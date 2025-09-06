@@ -308,30 +308,31 @@ class SpamDetectorPlugin(Star):
             recent_messages = self._get_user_recent_messages(user_id, last_time)
             logger.info(f"获取到用户 {user_id} 最近 {last_time} 分钟内的 {len(recent_messages)} 条消息")
             
-            # 2. 撤回当前消息（如果平台支持）
-            logger.info("步骤2: 尝试撤回触发消息")
-            await self._try_recall_message(event)
-            # 3. 撤回用户最近的所有消息（如果平台支持）
-            logger.info("步骤3: 尝试撤回历史消息")
-            await self._try_recall_recent_messages(event, user_id, last_time)
-            
-            # 3. 禁言用户（如果平台支持）
-            mute_duration = self._get_config_value("MUTE_DURATION", 600)  # 默认10分钟
-            logger.info(f"步骤3: 尝试禁言用户 {mute_duration} 秒")
-            await self._try_mute_user(event, user_id, mute_duration)
-            
-            # 4. 转发到管理员群
+            # 2. 转发到管理员群（若配置）
             admin_chat_id = self._get_config_value("ADMIN_CHAT_ID", "")
             if admin_chat_id:
-                logger.info(f"步骤4: 转发推销消息到管理员群: {admin_chat_id}")
+                logger.info(f"步骤2: 转发推销消息到管理员群: {admin_chat_id}")
                 await self._forward_to_admin(admin_chat_id, user_name, user_id, recent_messages, event)
             else:
-                logger.warning("步骤4: 管理员群聊ID未配置，无法转发推销消息")
+                logger.warning("步骤2: 管理员群聊ID未配置，无法转发推销消息")
             
-            # 5. 发送警告消息
+            # 3. 撤回当前消息（如果平台支持）
+            logger.info("步骤3: 尝试撤回触发消息")
+            await self._try_recall_message(event)
+            
+            # 4. 撤回用户最近的所有消息（如果平台支持）
+            logger.info("步骤4: 尝试撤回历史消息")
+            await self._try_recall_recent_messages(event, user_id, last_time)
+            
+            # 5. 禁言用户（如果平台支持）
+            mute_duration = self._get_config_value("MUTE_DURATION", 600)  # 默认10分钟
+            logger.info(f"步骤5: 尝试禁言用户 {mute_duration} 秒")
+            await self._try_mute_user(event, user_id, mute_duration)
+            
+            # 6. 发送警告消息
             alert_message = self._get_config_value("SPAM_ALERT_MESSAGE",
                 "⚠️ 检测到疑似推销信息，该消息已被处理，用户已被禁言。")
-            logger.info(f"步骤5: 发送警告消息: {alert_message}")
+            logger.info(f"步骤6: 发送警告消息: {alert_message}")
             return event.plain_result(alert_message)
             
         except Exception as e:
