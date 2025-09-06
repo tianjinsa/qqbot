@@ -339,6 +339,10 @@ class SpamDetectorPlugin(Star):
                               recent_messages: List[str], event: AstrMessageEvent):
         """转发消息到管理员群"""
         try:
+            if not admin_chat_id:
+                logger.warning("管理员群聊ID未配置，无法转发消息")
+                return
+                
             group_id = event.get_group_id()
             
             # 构建转发内容
@@ -355,13 +359,16 @@ class SpamDetectorPlugin(Star):
             # 构建统一消息来源标识符
             admin_unified_origin = f"{event.get_platform_name()}:group:{admin_chat_id}"
             
-            # 发送到管理员群
+            # 使用正确的MessageChain导入和发送方式
             from astrbot.api.event import MessageChain
             message_chain = MessageChain().message(forward_content)
+            
+            logger.info(f"正在转发推销报告到管理员群: {admin_unified_origin}")
             await self.context.send_message(admin_unified_origin, message_chain)
+            logger.info("推销报告转发成功")
             
         except Exception as e:
-            logger.error(f"转发到管理员群失败: {e}")
+            logger.error(f"转发到管理员群失败: {e}", exc_info=True)
     
     async def _try_recall_message(self, event: AstrMessageEvent):
         """尝试撤回消息（如果平台支持）"""
@@ -533,6 +540,9 @@ class SpamDetectorPlugin(Star):
     async def test_spam_detection(self, event: AstrMessageEvent, message: str = ""):
         """测试推销检测功能"""
         try:
+            # 将所有参数合并为一个消息字符串
+            # message = " ".join(args) if args else ""
+            
             if not message:
                 yield event.plain_result(
                     "📝 推销检测测试命令使用方法:\n"
@@ -558,49 +568,63 @@ class SpamDetectorPlugin(Star):
         try:
             config_status = []
             
-            # 检查必要配置
-            required_configs = [
-                "TEXT_MODEL_API_KEY",
-                "ADMIN_CHAT_ID"
-            ]
+            # 检查配置项
+            admin_chat_id = self._get_config_value("ADMIN_CHAT_ID", "")
+            config_status.append(f"管理员群聊ID: {'已配置' if admin_chat_id else '❌ 未配置'} ({admin_chat_id})")
             
-            for config_key in required_configs:
-                value = self._get_config_value(config_key, "")
-                status = "✅ 已配置" if value else "❌ 未配置"
-                config_status.append(f"{config_key}: {status}")
+            group_whitelist = self._get_config_value("GROUP_WHITELIST", [])
+            config_status.append(f"群聊白名单: {len(group_whitelist)} 个群聊")
             
-            # 检查可选配置
-            optional_configs = [
-                ("VISION_MODEL_API_KEY", "视觉模型"),
-                ("WHITELIST_USERS", "用户白名单"),
-                ("WHITELIST_GROUPS", "群聊白名单"),
-                ("MUTE_DURATION", "禁言时长"),
-                ("LAST_TIME", "回溯时间")
-            ]
+            user_whitelist = self._get_config_value("WHITELIST_USERS", [])
+            config_status.append(f"用户白名单: {len(user_whitelist)} 个用户")
             
-            for config_key, desc in optional_configs:
-                value = self._get_config_value(config_key, "")
-                if value:
-                    config_status.append(f"{desc}: ✅ {value}")
-                else:
-                    config_status.append(f"{desc}: ⚪ 使用默认值")
+            # 检查模型配置
+            text_model_api_key = self._get_config_value("TEXT_MODEL_API_KEY", "")
+            config_status.append(f"文本模型API Key: {'已配置' if text_model_api_key else '❌ 未配置'}")
             
-            # 用户消息缓存状态
-            cache_info = f"缓存用户数: {len(self.user_message_history)}"
-            total_messages = sum(len(msgs) for msgs in self.user_message_history.values())
-            cache_info += f", 总消息数: {total_messages}"
+            vision_model_api_key = self._get_config_value("VISION_MODEL_API_KEY", "")
+            config_status.append(f"视觉模型API Key: {'已配置' if vision_model_api_key else '❌ 未配置'}")
             
-            debug_info = f"🔧 推销插件调试信息\n\n" + \
-                        f"📋 配置状态:\n" + "\n".join(config_status) + \
-                        f"\n\n💾 {cache_info}" + \
-                        f"\n\n🤖 平台: {event.get_platform_name()}" + \
-                        f"\n📍 当前群聊: {event.get_group_id() or '私聊'}"
+            # 检查当前群聊状态
+            current_group = event.get_group_id()
+            if current_group:
+                is_group_whitelisted = self._is_group_whitelisted(current_group)
+                config_status.append(f"当前群聊 {current_group}: {'✅ 在白名单中' if is_group_whitelisted else '❌ 不在白名单中'}")
             
+            # 检查消息历史
+            total_cached_users = len(self.user_message_history)
+            config_status.append(f"缓存用户消息: {total_cached_users} 个用户")
+            
+            debug_info = "🔧 推销插件调试信息:\n" + "\n".join(f"• {status}" for status in config_status)
             yield event.plain_result(debug_info)
             
         except Exception as e:
-            logger.error(f"调试推销插件时出错: {e}", exc_info=True)
+            logger.error(f"调试插件状态时出错: {e}", exc_info=True)
             yield event.plain_result("❌ 调试失败，请检查日志")
+    
+    @filter.command("spam_test_forward", alias={"测试转发"})
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def test_forward_function(self, event: AstrMessageEvent):
+        """测试转发功能"""
+        try:
+            admin_chat_id = self._get_config_value("ADMIN_CHAT_ID", "")
+            if not admin_chat_id:
+                yield event.plain_result("❌ 管理员群聊ID未配置，无法测试转发功能")
+                return
+            
+            # 模拟推销消息数据
+            test_user_id = event.get_sender_id()
+            test_user_name = event.get_sender_name()
+            test_messages = ["这是测试消息1", "这是测试消息2"]
+            
+            logger.info(f"开始测试转发功能到群聊: {admin_chat_id}")
+            await self._forward_to_admin(admin_chat_id, test_user_name, test_user_id, test_messages, event)
+            
+            yield event.plain_result(f"✅ 转发测试完成，已发送到群聊: {admin_chat_id}")
+            
+        except Exception as e:
+            logger.error(f"测试转发功能时出错: {e}", exc_info=True)
+            yield event.plain_result("❌ 转发测试失败，请检查日志和配置")
     
     async def terminate(self):
         """插件卸载时的清理工作"""
