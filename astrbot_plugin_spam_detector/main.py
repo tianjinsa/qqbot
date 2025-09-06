@@ -1,14 +1,15 @@
 import asyncio
 import json
 import time
+import base64
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
+import aiohttp
 
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
 import astrbot.api.message_components as Comp
-from astrbot.api.provider import ProviderRequest
 
 
 @register("astrbot_plugin_spam_detector", "AstrBot Dev Team", "智能防推销插件，使用AI检测并处理推销信息", "1.0.0", "https://github.com/AstrBotDevs/astrbot_plugin_spam_detector")
@@ -23,6 +24,42 @@ class SpamDetectorPlugin(Star):
         """插件初始化"""
         logger.info("防推销插件已启动")
         
+    async def _make_openai_request(self, base_url: str, api_key: str, model_id: str, 
+                                 messages: List[Dict], timeout: int = 30) -> Optional[str]:
+        """发送OpenAI格式的HTTP请求"""
+        try:
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}"
+            }
+            
+            payload = {
+                "model": model_id,
+                "messages": messages,
+                "temperature": 0.1,
+                "max_tokens": 1000
+            }
+            
+            url = f"{base_url.rstrip('/')}/chat/completions"
+            
+            timeout_obj = aiohttp.ClientTimeout(total=timeout)
+            async with aiohttp.ClientSession(timeout=timeout_obj) as session:
+                async with session.post(url, headers=headers, json=payload) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        if "choices" in result and len(result["choices"]) > 0:
+                            return result["choices"][0]["message"]["content"]
+                    else:
+                        error_text = await response.text()
+                        logger.error(f"模型API请求失败: {response.status} - {error_text}")
+                        
+        except asyncio.TimeoutError:
+            logger.error(f"模型API请求超时: {timeout}秒")
+        except Exception as e:
+            logger.error(f"模型API请求异常: {e}")
+        
+        return None
+        
     def _get_config_value(self, key: str, default: Any = None) -> Any:
         """获取配置值，带默认值支持"""
         return self.config.get(key, default)
@@ -34,6 +71,22 @@ class SpamDetectorPlugin(Star):
             # 如果是字符串，按逗号分割
             whitelist = [uid.strip() for uid in whitelist.split(",") if uid.strip()]
         return user_id in whitelist
+    
+    def _is_group_whitelisted(self, group_id: str) -> bool:
+        """检查群聊是否在白名单中"""
+        if not group_id:
+            return False
+        
+        whitelist = self._get_config_value("WHITELIST_GROUPS", [])
+        if isinstance(whitelist, str):
+            # 如果是字符串，按逗号分割
+            whitelist = [gid.strip() for gid in whitelist.split(",") if gid.strip()]
+        
+        # 如果白名单为空，则检测所有群聊
+        if not whitelist:
+            return True
+        
+        return group_id in whitelist
     
     def _store_user_message(self, user_id: str, message_content: str, timestamp: float, message_id: str = ""):
         """存储用户消息到历史记录"""
@@ -72,36 +125,88 @@ class SpamDetectorPlugin(Star):
         return []
     
     async def _extract_image_content(self, image_urls: List[str]) -> str:
-        """使用视觉模型提取图片内容"""
+        """使用自定义视觉模型提取图片内容"""
         if not image_urls:
             return ""
         
         try:
-            # 使用AstrBot的LLM接口进行图片内容识别
-            provider = self.context.get_using_provider()
-            if not provider:
-                logger.warning("未找到可用的LLM提供商，无法处理图片内容")
+            # 获取视觉模型配置
+            vision_model_id = self._get_config_value("VISION_MODEL_ID", "gpt-4-vision-preview")
+            vision_base_url = self._get_config_value("VISION_MODEL_BASE_URL", "https://api.openai.com/v1")
+            vision_api_key = self._get_config_value("VISION_MODEL_API_KEY", "")
+            timeout = self._get_config_value("MODEL_TIMEOUT", 30)
+            
+            if not vision_api_key:
+                logger.warning("视觉模型API Key未配置，无法处理图片内容")
                 return ""
             
-            response = await provider.text_chat(
-                prompt="请描述这张图片的主要内容，特别是如果有文字请提取出来。",
-                image_urls=image_urls,
-                system_prompt="你是一个图片内容识别助手，请客观描述图片内容。"
+            # 处理图片URL，支持本地文件路径转base64
+            processed_images = []
+            for url in image_urls[:3]:  # 最多处理3张图片
+                if url.startswith(('http://', 'https://')):
+                    processed_images.append({
+                        "type": "image_url",
+                        "image_url": {"url": url}
+                    })
+                else:
+                    # 本地文件路径，转换为base64
+                    try:
+                        import os
+                        if os.path.exists(url):
+                            with open(url, "rb") as image_file:
+                                image_data = base64.b64encode(image_file.read()).decode()
+                                # 根据文件扩展名确定MIME类型
+                                ext = url.lower().split('.')[-1]
+                                mime_type = f"image/{ext}" if ext in ['jpg', 'jpeg', 'png', 'gif', 'webp'] else "image/jpeg"
+                                processed_images.append({
+                                    "type": "image_url",
+                                    "image_url": {"url": f"data:{mime_type};base64,{image_data}"}
+                                })
+                    except Exception as e:
+                        logger.warning(f"处理本地图片失败: {e}")
+            
+            if not processed_images:
+                return ""
+            
+            # 构建消息
+            messages = [
+                {
+                    "role": "system",
+                    "content": "你是一个图片内容识别助手，请客观描述图片内容，特别是提取其中的文字信息。"
+                },
+                {
+                    "role": "user", 
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "请描述这张图片的主要内容，特别是如果有文字请完整提取出来。"
+                        }
+                    ] + processed_images
+                }
+            ]
+            
+            # 调用视觉模型
+            result = await self._make_openai_request(
+                vision_base_url, vision_api_key, vision_model_id, messages, timeout
             )
             
-            if response and response.completion_text:
-                return response.completion_text
+            return result or ""
+            
         except Exception as e:
             logger.error(f"图片内容提取失败: {e}")
-        
-        return ""
+            return ""
     
     async def _is_spam_message(self, message_content: str, context_messages: List[str], image_content: str = "") -> bool:
-        """使用LLM判断是否为推销消息"""
+        """使用自定义文本模型判断是否为推销消息"""
         try:
-            provider = self.context.get_using_provider()
-            if not provider:
-                logger.warning("未找到可用的LLM提供商，无法进行推销检测")
+            # 获取文本模型配置
+            text_model_id = self._get_config_value("TEXT_MODEL_ID", "gpt-3.5-turbo")
+            text_base_url = self._get_config_value("TEXT_MODEL_BASE_URL", "https://api.openai.com/v1")
+            text_api_key = self._get_config_value("TEXT_MODEL_API_KEY", "")
+            timeout = self._get_config_value("MODEL_TIMEOUT", 30)
+            
+            if not text_api_key:
+                logger.warning("文本模型API Key未配置，无法进行推销检测")
                 return False
             
             # 合并消息内容
@@ -129,14 +234,20 @@ class SpamDetectorPlugin(Star):
             
             prompt = f"请判断以下消息是否为推销信息：\n\n{full_content}{context_text}"
             
-            response = await provider.text_chat(
-                prompt=prompt,
-                system_prompt=system_prompt
+            # 构建消息
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ]
+            
+            # 调用文本模型
+            result = await self._make_openai_request(
+                text_base_url, text_api_key, text_model_id, messages, timeout
             )
             
-            if response and response.completion_text:
-                result = response.completion_text.strip().lower()
-                # 判断LLM的回复
+            if result:
+                result = result.strip().lower()
+                # 判断模型的回复
                 return "是" in result or "yes" in result or "spam" in result
                 
         except Exception as e:
@@ -175,11 +286,13 @@ class SpamDetectorPlugin(Star):
                               recent_messages: List[str], event: AstrMessageEvent):
         """转发消息到管理员群"""
         try:
+            group_id = event.get_group_id()
+            
             # 构建转发内容
             forward_content = f"🚨 推销检测报告\n"
             forward_content += f"用户: {user_name} ({user_id})\n"
             forward_content += f"平台: {event.get_platform_name()}\n"
-            forward_content += f"群组: {event.get_group_id() or '私聊'}\n"
+            forward_content += f"原群聊ID: {group_id or '私聊'}\n"
             forward_content += f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
             forward_content += f"最近 {len(recent_messages)} 条消息:\n"
             
@@ -281,12 +394,18 @@ class SpamDetectorPlugin(Star):
     async def on_group_message(self, event: AstrMessageEvent):
         """监听群聊消息"""
         try:
+            group_id = event.get_group_id()
             user_id = event.get_sender_id()
             user_name = event.get_sender_name()
             message_content = event.message_str
             timestamp = time.time()
             
-            # 白名单检查
+            # 群聊白名单检查
+            if not self._is_group_whitelisted(group_id):
+                logger.debug(f"群聊 {group_id} 不在白名单中，跳过检测")
+                return
+            
+            # 用户白名单检查
             if self._is_user_whitelisted(user_id):
                 logger.debug(f"用户 {user_id} 在白名单中，跳过检测")
                 return
@@ -342,7 +461,7 @@ class SpamDetectorPlugin(Star):
             yield event.plain_result(f"🔍 推销检测结果: {result}\n测试消息: {message}")
         except Exception as e:
             logger.error(f"测试推销检测时出错: {e}")
-            yield event.plain_result("❌ 测试失败，请检查日志")
+            yield event.plain_result("❌ 测试失败，请检查日志和模型配置")
     
     async def terminate(self):
         """插件卸载时的清理工作"""

@@ -86,7 +86,15 @@ def test_config_schema():
             "MUTE_DURATION",
             "CONTEXT_MESSAGE_COUNT",
             "WHITELIST_USERS",
-            "LLM_SYSTEM_PROMPT"
+            "WHITELIST_GROUPS",
+            "LLM_SYSTEM_PROMPT",
+            "TEXT_MODEL_ID",
+            "TEXT_MODEL_BASE_URL", 
+            "TEXT_MODEL_API_KEY",
+            "VISION_MODEL_ID",
+            "VISION_MODEL_BASE_URL",
+            "VISION_MODEL_API_KEY",
+            "MODEL_TIMEOUT"
         ]
         
         missing_configs = []
@@ -124,6 +132,7 @@ def test_main_structure():
             "@filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)",
             "async def on_group_message(self, event: AstrMessageEvent):",
             "_is_user_whitelisted",
+            "_is_group_whitelisted",
             "_is_spam_message",
             "_handle_spam_message",
             "from astrbot.api import logger, AstrBotConfig"

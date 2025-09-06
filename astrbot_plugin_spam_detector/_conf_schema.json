@@ -35,6 +35,12 @@
     "default": [],
     "hint": "在此列表中的用户ID将不会被进行推销检测。可以逗号分隔输入多个用户ID，或使用管理命令添加"
   },
+  "WHITELIST_GROUPS": {
+    "description": "白名单群聊列表",
+    "type": "list",
+    "default": [],
+    "hint": "只有在此列表中的群聊ID才会进行推销检测。如果为空则检测所有群聊。可以逗号分隔输入多个群聊ID"
+  },
   "LLM_SYSTEM_PROMPT": {
     "description": "大模型系统提示词",
     "type": "text",
@@ -42,5 +48,48 @@
     "hint": "自定义大模型的系统提示词，用于引导模型更好地判断推销信息。建议保持简洁明确的指令格式",
     "editor_mode": true,
     "editor_language": "text"
+  },
+  "TEXT_MODEL_ID": {
+    "description": "文本模型ID",
+    "type": "string",
+    "default": "gpt-3.5-turbo",
+    "hint": "用于推销检测的文本模型名称，如 gpt-3.5-turbo, gpt-4, qwen-plus 等",
+    "obvious_hint": true
+  },
+  "TEXT_MODEL_BASE_URL": {
+    "description": "文本模型Base URL",
+    "type": "string",
+    "default": "https://api.openai.com/v1",
+    "hint": "文本模型的API基础地址，支持OpenAI兼容格式",
+    "obvious_hint": true
+  },
+  "TEXT_MODEL_API_KEY": {
+    "description": "文本模型API Key",
+    "type": "string",
+    "hint": "文本模型的API密钥，请确保密钥有效且有足够的额度",
+    "obvious_hint": true
+  },
+  "VISION_MODEL_ID": {
+    "description": "视觉模型ID",
+    "type": "string",
+    "default": "gpt-4-vision-preview",
+    "hint": "用于图片内容识别的视觉模型名称，如 gpt-4-vision-preview, qwen-vl-plus 等"
+  },
+  "VISION_MODEL_BASE_URL": {
+    "description": "视觉模型Base URL", 
+    "type": "string",
+    "default": "https://api.openai.com/v1",
+    "hint": "视觉模型的API基础地址，支持OpenAI兼容格式"
+  },
+  "VISION_MODEL_API_KEY": {
+    "description": "视觉模型API Key",
+    "type": "string", 
+    "hint": "视觉模型的API密钥，可以与文本模型使用相同密钥"
+  },
+  "MODEL_TIMEOUT": {
+    "description": "模型请求超时时间（秒）",
+    "type": "int",
+    "default": 30,
+    "hint": "调用模型API的超时时间，建议设置为30-60秒"
   }
 }
