@@ -23,12 +23,6 @@
     "default": 600,
     "hint": "检测到推销信息后禁言用户的时长，单位为秒。600秒=10分钟，3600秒=1小时"
   },
-  "CONTEXT_MESSAGE_COUNT": {
-    "description": "上下文消息数量",
-    "type": "int",
-    "default": 1,
-    "hint": "每次调用大模型时，除当前消息外，额外包含的最近上下文消息数量，有助于提高检测准确性"
-  },
   "WHITELIST_USERS": {
     "description": "白名单用户列表",
     "type": "list",
@@ -91,5 +85,61 @@
     "type": "int",
     "default": 30,
     "hint": "调用模型API的超时时间，建议设置为30-60秒"
+  },
+  "QUEUE_RATE_LIMIT": {
+    "description": "队列处理速率限制（秒）",
+    "type": "float",
+    "default": 1.0,
+    "hint": "控制AI模型调用的最小间隔时间，避免频繁调用。建议设置为0.5-2.0秒"
+  },
+  "BATCH_PROCESS_SIZE": {
+    "description": "批量处理大小",
+    "type": "int",
+    "default": 3,
+    "hint": "一次批量处理的最大消息数量，建议设置为3-10条"
+  },
+  "BATCH_MAX_TEXT_LENGTH": {
+    "description": "批量处理最大文本长度（字符数）",
+    "type": "int",
+    "default": 2000,
+    "hint": "批量处理时所有消息内容的最大总字符数，超出此限制的消息将单独处理"
+  },
+  "TEXT_MODEL_TEMPERATURE": {
+    "description": "文本模型温度",
+    "type": "float",
+    "default": 0.7,
+    "hint": "控制文本模型生成的随机性，范围0-2，值越低结果越确定"
+  },
+  "TEXT_MODEL_THINKING_ENABLED": {
+    "description": "启用文本模型思考模式",
+    "type": "bool",
+    "default": true,
+    "hint": "是否为文本模型启用思考模式，可能提高准确性但增加响应时间"
+  },
+  "VISION_MODEL_TEMPERATURE": {
+    "description": "视觉模型温度",
+    "type": "float",
+    "default": 0.7,
+    "hint": "控制视觉模型生成的随机性，范围0-2，值越低结果越确定"
+  },
+  "VISION_MODEL_THINKING_ENABLED": {
+    "description": "启用视觉模型思考模式",
+    "type": "bool",
+    "default": true,
+    "hint": "是否为视觉模型启用思考模式，可能提高准确性但增加响应时间"
+  },
+  "VISION_MODEL_SYSTEM_PROMPT": {
+    "description": "视觉模型系统提示词",
+    "type": "text",
+    "default": "提取图片上的内容，特别是文字",
+    "hint": "自定义视觉模型的系统提示词，用于引导模型更好地识别图片内容",
+    "editor_mode": true,
+    "editor_language": "text"
+  },
+  "MAX_DETECTION_QUEUE_SIZE": {
+    "description": "最大检测队列大小",
+    "type": "int",
+    "default": 180,
+    "hint": "检测队列的最大容量，超出时会跳过新消息，避免内存占用过高"
   }
 }

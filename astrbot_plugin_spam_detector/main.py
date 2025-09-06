@@ -1,10 +1,9 @@
 import asyncio
-import json
 import time
 import base64
-from datetime import datetime, timedelta
+import json
+from datetime import datetime
 from typing import List, Dict, Any, Optional
-import aiohttp
 from openai import AsyncOpenAI
 
 from astrbot.api.event import filter, AstrMessageEvent
@@ -18,18 +17,258 @@ class SpamDetectorPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
-        # 用户消息历史缓存 (用户ID -> 消息列表)
-        self.user_message_history = {}  # type: Dict[str, List[Dict[str, Any]]]
-        # 已处理过的消息ID -> 时间戳，用于防止重复处理
-        self.processed_messages = {}  # type: Dict[str, float]
-        # 用户最近一次被判定为推销并处理的时间（可用于频繁触发保护）
-        self.user_last_spam_handle = {}  # type: Dict[str, float]
-        # 上次全局清理时间
-        self.last_cleanup_time = 0.0
+        # 每个群聊的消息池：群聊ID -> {用户ID -> [消息记录]}
+        self.group_message_pools = {}  # type: Dict[str, Dict[str, List[Dict[str, Any]]]]
+        # 推销检测处理队列：存储(群聊ID, 用户ID, 消息内容, 发送时间, 事件对象)
+        self.detection_queue = asyncio.Queue()
+        self.last_model_call_time = 0.0
+        self.detection_worker_running = False
+        # 批量处理缓冲区：群聊ID -> [检测任务列表]
+        self.batch_buffer = {}  # type: Dict[str, List[tuple]]
+        self.batch_timer = {}  # type: Dict[str, float]
         
     async def initialize(self):
         """插件初始化"""
         logger.info("防推销插件已启动")
+        # 启动检测队列处理器
+        asyncio.create_task(self._detection_worker())
+        
+    async def _detection_worker(self):
+        """队列处理器：支持批量处理和速率限制的推销检测请求"""
+        self.detection_worker_running = True
+        logger.info("推销检测队列处理器已启动")
+        
+        while self.detection_worker_running:
+            try:
+                # 获取配置
+                batch_size = int(self._get_config_value("BATCH_PROCESS_SIZE", 3))
+                rate_limit = float(self._get_config_value("QUEUE_RATE_LIMIT", 1.0))
+                
+                # 等待队列中的检测任务
+                detection_task = await self.detection_queue.get()
+                group_id, user_id, user_name, message_content, timestamp, event, image_content = detection_task
+                
+                # 初始化群聊的批量缓冲区
+                if group_id not in self.batch_buffer:
+                    self.batch_buffer[group_id] = []
+                    self.batch_timer[group_id] = time.time()
+                
+                # 添加任务到批量缓冲区
+                self.batch_buffer[group_id].append(detection_task)
+                
+                # 检查是否需要批量处理
+                should_process = (
+                    len(self.batch_buffer[group_id]) >= batch_size or  # 达到批量大小
+                    time.time() - self.batch_timer[group_id] > 5.0  # 超过5秒等待时间
+                )
+                
+                if should_process:
+                    # 速率限制：确保距离上次调用至少rate_limit秒
+                    now = time.time()
+                    time_since_last_call = now - self.last_model_call_time
+                    if time_since_last_call < rate_limit:
+                        await asyncio.sleep(rate_limit - time_since_last_call)
+                    
+                    # 更新最后调用时间
+                    self.last_model_call_time = time.time()
+                    
+                    # 处理批量任务
+                    tasks_to_process = self.batch_buffer[group_id].copy()
+                    self.batch_buffer[group_id].clear()
+                    self.batch_timer[group_id] = time.time()
+                    
+                    await self._process_batch_tasks(group_id, tasks_to_process)
+                
+                # 标记任务完成
+                self.detection_queue.task_done()
+                
+            except asyncio.CancelledError:
+                logger.info("推销检测队列处理器被取消")
+                break
+            except Exception as e:
+                logger.error(f"队列处理器出错: {e}", exc_info=True)
+                await asyncio.sleep(1)  # 出错时暂停1秒
+        
+        logger.info("推销检测队列处理器已停止")
+    
+    async def _process_batch_tasks(self, group_id: str, tasks: List[tuple]):
+        """批量处理同一群聊的检测任务"""
+        try:
+            # 获取批量处理配置
+            max_batch_text_length = int(self._get_config_value("BATCH_MAX_TEXT_LENGTH", 2000))
+            batch_size = int(self._get_config_value("BATCH_PROCESS_SIZE", 3))
+            
+            logger.info(f"开始批量处理群聊 {group_id} 的 {len(tasks)} 条消息")
+            
+            # 第一批：符合字数和数量限制的消息
+            main_batch_tasks = []
+            remaining_tasks = []
+            total_text_length = 0
+            
+            for task in tasks:
+                if len(main_batch_tasks) >= batch_size:
+                    remaining_tasks.extend(tasks[len(main_batch_tasks):])
+                    break
+                    
+                full_content = self._build_full_content(task)
+                
+                # 检查是否超过字数限制
+                if total_text_length + len(full_content) > max_batch_text_length:
+                    # 如果第一条消息就超过限制，单独处理
+                    if len(main_batch_tasks) == 0:
+                        await self._process_single_task(task, group_id, "消息过长，单独处理")
+                        remaining_tasks.extend(tasks[1:])
+                    else:
+                        remaining_tasks.extend(tasks[len(main_batch_tasks):])
+                    break
+                
+                main_batch_tasks.append(task)
+                total_text_length += len(full_content)
+            
+            # 处理主批量
+            if main_batch_tasks:
+                await self._process_task_batch(main_batch_tasks, group_id, "主批量")
+            
+            # 处理剩余任务
+            if remaining_tasks:
+                await self._process_task_batch(remaining_tasks, group_id, "剩余任务")
+                
+        except Exception as e:
+            logger.error(f"批量处理任务时出错: {e}", exc_info=True)
+            # 错误回退：逐条处理
+            logger.info(f"尝试逐条批量处理 {len(tasks)} 条消息")
+            for task in tasks:
+                try:
+                    await self._process_single_task(task, group_id, "回退处理")
+                except Exception as single_e:
+                    logger.error(f"单个任务处理失败: {single_e}", exc_info=True)
+    
+    def _build_full_content(self, task: tuple) -> str:
+        """构建完整的消息内容（文本+图片）"""
+        _, user_id, user_name, message_content, timestamp, event, image_content = task
+        full_content = message_content
+        if image_content:
+            full_content += f"\n图片内容：{image_content}"
+        return full_content
+    
+    def _extract_task_info(self, task: tuple) -> tuple:
+        """提取任务信息"""
+        _, user_id, user_name, message_content, timestamp, event, image_content = task
+        return user_id, user_name, message_content, timestamp, event, image_content
+    
+    async def _process_task_batch(self, tasks: List[tuple], group_id: str, batch_type: str):
+        """处理一批任务"""
+        if not tasks:
+            return
+            
+        logger.info(f"开始{batch_type}处理 {len(tasks)} 条消息")
+        
+        # 构建批量输入
+        batch_input = {}
+        task_map = {}
+        
+        for task in tasks:
+            user_id, user_name, message_content, timestamp, event, image_content = self._extract_task_info(task)
+            full_content = self._build_full_content(task)
+            batch_input[user_id] = full_content
+            task_map[user_id] = task
+        
+        # 批量检测
+        total_chars = sum(len(content) for content in batch_input.values())
+        logger.info(f"{batch_type}检测 {len(batch_input)} 条消息，总字符数: {total_chars}")
+        
+        spam_user_ids = await self._batch_spam_detection(batch_input)
+        
+        # 处理检测结果
+        for user_id in spam_user_ids:
+            if user_id in task_map:
+                task = task_map[user_id]
+                user_id, user_name, message_content, timestamp, event, image_content = self._extract_task_info(task)
+                await self._handle_spam_detection_result(user_id, user_name, group_id, event, batch_type)
+        
+        logger.info(f"{batch_type}处理完成，发现 {len(spam_user_ids)} 个推销用户")
+    
+    async def _process_single_task(self, task: tuple, group_id: str, reason: str):
+        """处理单个任务"""
+        user_id, user_name, message_content, timestamp, event, image_content = self._extract_task_info(task)
+        full_content = self._build_full_content(task)
+        
+        logger.warning(f"{reason}: {full_content[:50]}... (用户: {user_name})")
+        
+        # 使用单条批量检测
+        single_batch_input = {user_id: full_content}
+        spam_user_ids = await self._batch_spam_detection(single_batch_input)
+        
+        if user_id in spam_user_ids:
+            await self._handle_spam_detection_result(user_id, user_name, group_id, event, reason)
+    
+    async def _handle_spam_detection_result(self, user_id: str, user_name: str, group_id: str, event, context: str):
+        """处理推销检测结果"""
+        logger.info(f"🚨 {context}检测到推销消息，用户: {user_name} ({user_id}), 群聊: {group_id}")
+        await self._handle_spam_message_new(event, group_id, user_id, user_name)
+    
+    async def _batch_spam_detection(self, batch_input: Dict[str, str]) -> List[str]:
+        """批量推销检测，返回被识别为推销的用户ID列表"""
+        try:
+            # 检查文本模型配置
+            text_api_key = self._get_config_value("TEXT_MODEL_API_KEY", "")
+            if not text_api_key:
+                logger.warning("文本模型API Key未配置，无法进行批量推销检测")
+                return []
+            
+            logger.debug(f"开始批量推销检测，消息数量: {len(batch_input)}")
+            
+            # 构建批量检测的提示词
+            batch_content = json.dumps(batch_input, ensure_ascii=False, indent=2)
+            
+            # 获取系统提示词
+            system_prompt = self._get_config_value("LLM_SYSTEM_PROMPT",
+                """你是一个专业的推销信息检测助手。你将收到一个JSON格式的批量消息，其中包含多个用户的消息内容。
+
+推销信息的特征包括但不限于：
+1. 销售产品或服务
+2. 包含价格、优惠、折扣等商业信息
+3. 引导添加微信、QQ等联系方式进行交易
+4. 推广某个商品、品牌或服务
+5. 含有明显的营销意图
+
+请分析所有消息，找出其中的推销信息，并返回一个JSON格式的结果，格式为：{"y":[用户ID1,用户ID2,...]}
+其中y数组包含所有被识别为推销信息的用户ID。如果没有推销信息，返回{"y":[]}""")
+            
+            prompt = f"请分析以下批量消息，识别出推销信息的用户ID：\n\n{batch_content}"
+            
+            # 构建消息
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ]
+            
+            logger.debug(f"发送给文本模型的批量检测提示词: {prompt[:200]}...")
+            
+            # 调用文本模型进行批量检测
+            result = await self._call_text_model(messages)
+            
+            if result:
+                try:
+                    # 解析JSON结果
+                    result_json = json.loads(result.strip())
+                    spam_user_ids = result_json.get("y", [])
+                    
+                    # 确保返回的是字符串列表
+                    spam_user_ids = [str(uid) for uid in spam_user_ids]
+                    
+                    logger.info(f"批量推销检测模型返回结果: {spam_user_ids}")
+                    return spam_user_ids
+                except json.JSONDecodeError as e:
+                    logger.warning(f"批量检测结果JSON解析失败: {e}, 原始结果: {result}")
+                    return []
+            else:
+                logger.warning("批量推销检测模型未返回结果")
+                return []
+                
+        except Exception as e:
+            logger.error(f"批量推销检测失败: {e}", exc_info=True)
+            return []
         
     async def _call_text_model(self, messages: List[Dict], model_id: str = None) -> Optional[str]:
         """调用文本模型"""
@@ -40,12 +279,14 @@ class SpamDetectorPlugin(Star):
             base_url = self._get_config_value("TEXT_MODEL_BASE_URL", "https://api.openai.com/v1")
             api_key = self._get_config_value("TEXT_MODEL_API_KEY", "")
             timeout = self._get_config_value("MODEL_TIMEOUT", 30)
+            temperature = self._get_config_value("TEXT_MODEL_TEMPERATURE", 0.7)
+            thinking_enabled = self._get_config_value("TEXT_MODEL_THINKING_ENABLED", False)
             
             if not api_key:
                 logger.warning("文本模型API Key未配置")
                 return None
             
-            logger.debug(f"调用文本模型: model_id={model_id}, base_url={base_url}, timeout={timeout}")
+            logger.debug(f"调用文本模型: model_id={model_id}, base_url={base_url}, timeout={timeout}, temperature={temperature}, thinking_enabled={thinking_enabled}")
             
             # 创建OpenAI客户端
             client = AsyncOpenAI(
@@ -54,13 +295,20 @@ class SpamDetectorPlugin(Star):
                 timeout=timeout
             )
             
+            # 构建API调用参数
+            api_params = {
+                "model": model_id,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": 1000
+            }
+            
+            # 如果启用思考模式，添加thinking参数
+            if thinking_enabled:
+                api_params["thinking"] = {"type": "enabled"}
+            
             # 调用文本模型
-            response = await client.chat.completions.create(
-                model=model_id,
-                messages=messages,
-                temperature=0.7,
-                max_tokens=1000
-            )
+            response = await client.chat.completions.create(**api_params)
             
             if response.choices and len(response.choices) > 0:
                 logger.debug(f"文本模型调用成功，返回内容: {response.choices[0].message.content[:100]}...")
@@ -82,12 +330,15 @@ class SpamDetectorPlugin(Star):
             base_url = self._get_config_value("VISION_MODEL_BASE_URL", "https://api.openai.com/v1")
             api_key = self._get_config_value("VISION_MODEL_API_KEY", "")
             timeout = self._get_config_value("MODEL_TIMEOUT", 30)
+            temperature = self._get_config_value("VISION_MODEL_TEMPERATURE", 0.7)
+            thinking_enabled = self._get_config_value("VISION_MODEL_THINKING_ENABLED", False)
+            system_prompt = self._get_config_value("VISION_MODEL_SYSTEM_PROMPT", "提取图片上的内容，特别是文字")
             
             if not api_key:
                 logger.warning("视觉模型API Key未配置")
                 return None
             
-            logger.debug(f"���用视觉模型: model_id={model_id}, base_url={base_url}, timeout={timeout}")
+            logger.debug(f"调用视觉模型: model_id={model_id}, base_url={base_url}, timeout={timeout}, temperature={temperature}, thinking_enabled={thinking_enabled}")
             
             # 创建OpenAI客户端
             client = AsyncOpenAI(
@@ -96,13 +347,23 @@ class SpamDetectorPlugin(Star):
                 timeout=timeout
             )
             
+            # 添加系统提示词到消息开头
+            enhanced_messages = [{"role": "system", "content": system_prompt}] + messages
+            
+            # 构建API调用参数
+            api_params = {
+                "model": model_id,
+                "messages": enhanced_messages,
+                "temperature": temperature,
+                "max_tokens": 1000
+            }
+            
+            # 如果启用思考模式，添加thinking参数
+            if thinking_enabled:
+                api_params["thinking"] = {"type": "enabled"}
+            
             # 调用视觉模型
-            response = await client.chat.completions.create(
-                model=model_id,
-                messages=messages,
-                temperature=0.7,
-                max_tokens=1000
-            )
+            response = await client.chat.completions.create(**api_params)
             
             if response.choices and len(response.choices) > 0:
                 logger.debug(f"视觉模型调用成功，返回内容: {response.choices[0].message.content[:100]}...")
@@ -143,101 +404,82 @@ class SpamDetectorPlugin(Star):
         
         return group_id in whitelist
     
-    def _store_user_message(self, user_id: str, message_content: str, timestamp: float, message_id: str = ""):
-        """存储用户消息到历史记录"""
-        if user_id not in self.user_message_history:
-            self.user_message_history[user_id] = []
+    def _add_message_to_pool(self, group_id: str, user_id: str, message_content: str, 
+                            timestamp: float, message_id: str = ""):
+        """将消息添加到对应群聊的消息池中"""
+        if group_id not in self.group_message_pools:
+            self.group_message_pools[group_id] = {}
         
-        self.user_message_history[user_id].append({
+        if user_id not in self.group_message_pools[group_id]:
+            self.group_message_pools[group_id][user_id] = []
+        
+        # 添加消息记录
+        message_record = {
             "content": message_content,
             "timestamp": timestamp,
             "message_id": message_id,
             "recalled": False
-        })
-        # 配置控制：保留时长与 LAST_TIME 同步（分钟 -> 秒）
-        retention_minutes = int(self._get_config_value("LAST_TIME", 5))
-        retention_seconds = retention_minutes * 60
-        max_per_user = int(self._get_config_value("MAX_MESSAGES_PER_USER", 200))
-        cutoff_time = timestamp - retention_seconds
-        # 过滤保留时间外的消息
-        self.user_message_history[user_id] = [m for m in self.user_message_history[user_id] if m["timestamp"] > cutoff_time]
-        # 每用户上限裁剪
-        if len(self.user_message_history[user_id]) > max_per_user:
-            self.user_message_history[user_id] = self.user_message_history[user_id][-max_per_user:]
-        # 清理 processed_messages 过期记录
-        expired_ids = [mid for mid, ts in self.processed_messages.items() if ts < cutoff_time]
-        for mid in expired_ids:
-            self.processed_messages.pop(mid, None)
-        # 限制 processed_messages 大小
-        if len(self.processed_messages) > 5000:
-            for mid, _ in sorted(self.processed_messages.items(), key=lambda x: x[1])[:1000]:
-                self.processed_messages.pop(mid, None)
-
-    def _get_forward_messages(self, user_id: str, last_minutes: int) -> List[str]:
-        """获取需要在转发报告中展示的最近消息（过滤已撤回与空内容）"""
-        if user_id not in self.user_message_history:
-            return []
-        cutoff_time = time.time() - (last_minutes * 60)
-        result: List[str] = []
-        for msg in self.user_message_history[user_id]:
-            if msg["timestamp"] >= cutoff_time and not msg.get("recalled"):
-                content = (msg.get("content") or "").strip()
-                if content:
-                    result.append(content)
-        return result
+        }
+        
+        self.group_message_pools[group_id][user_id].append(message_record)
+        
+        # 清理过期消息
+        self._cleanup_expired_messages(group_id, timestamp)
+        
+        logger.debug(f"已添加消息到群聊 {group_id} 用户 {user_id} 的消息池，当前池大小: {len(self.group_message_pools[group_id][user_id])}")
     
-    def _get_user_recent_messages(self, user_id: str, last_minutes: int) -> List[str]:
-        """获取用户在指定时间内的所有消息"""
-        if user_id not in self.user_message_history:
+    def _cleanup_expired_messages(self, group_id: str, current_timestamp: float):
+        """清理指定群聊中超过LAST_TIME的过期消息"""
+        if group_id not in self.group_message_pools:
+            return
+        
+        last_time_minutes = int(self._get_config_value("LAST_TIME", 5))
+        cutoff_time = current_timestamp - (last_time_minutes * 60)
+        
+        # 清理每个用户的过期消息
+        users_to_remove = []
+        for user_id, messages in self.group_message_pools[group_id].items():
+            # 保留未过期的消息
+            valid_messages = [msg for msg in messages if msg["timestamp"] > cutoff_time]
+            
+            if valid_messages:
+                self.group_message_pools[group_id][user_id] = valid_messages
+            else:
+                users_to_remove.append(user_id)
+        
+        # 移除没有消息的用户
+        for user_id in users_to_remove:
+            del self.group_message_pools[group_id][user_id]
+        
+        # 如果群聊中没有任何用户消息，移除整个群聊记录
+        if not self.group_message_pools[group_id]:
+            del self.group_message_pools[group_id]
+    
+    def _get_user_messages_in_group(self, group_id: str, user_id: str) -> List[Dict[str, Any]]:
+        """获取指定群聊中指定用户的所有消息"""
+        if group_id not in self.group_message_pools:
             return []
         
-        cutoff_time = time.time() - (last_minutes * 60)
-        recent_messages = [
-            msg["content"] for msg in self.user_message_history[user_id]
-            if msg["timestamp"] > cutoff_time
-        ]
-        return recent_messages
-
-    def _periodic_cleanup(self):
-        """周期性全局清理，避免内存增长"""
-        now = time.time()
-        if now - getattr(self, 'last_cleanup_time', 0) < 60:
-            return
-        self.last_cleanup_time = now
-        retention_minutes = int(self._get_config_value("LAST_TIME", 5))
-        retention_seconds = retention_minutes * 60
-        cutoff_time = now - retention_seconds
-        # 清理用户消息
-        stale_users = []
-        for uid, msgs in self.user_message_history.items():
-            new_list = [m for m in msgs if m["timestamp"] > cutoff_time]
-            if new_list:
-                self.user_message_history[uid] = new_list
-            else:
-                stale_users.append(uid)
-        for uid in stale_users:
-            self.user_message_history.pop(uid, None)
-        # 限制全局用户数
-        global_limit = int(self._get_config_value("GLOBAL_MAX_CACHED_USERS", 1000))
-        if len(self.user_message_history) > global_limit:
-            sorted_users = sorted(
-                ((uid, max(m["timestamp"] for m in msgs)) for uid, msgs in self.user_message_history.items() if msgs),
-                key=lambda x: x[1]
-            )
-            overflow = len(self.user_message_history) - global_limit
-            for uid, _ in sorted_users[:overflow]:
-                self.user_message_history.pop(uid, None)
-        # 清理 user_last_spam_handle 过期项（>1天）
-        spam_cutoff = now - 86400
-        for u in [u for u, ts in self.user_last_spam_handle.items() if ts < spam_cutoff]:
-            self.user_last_spam_handle.pop(u, None)
-        logger.debug(f"定期清理: users={len(self.user_message_history)} processed={len(self.processed_messages)}")
+        if user_id not in self.group_message_pools[group_id]:
+            return []
+        
+        return self.group_message_pools[group_id][user_id].copy()
     
-    async def _get_context_messages(self, event: AstrMessageEvent, count: int) -> List[str]:
-        """获取上下文消息（这里简化实现，实际可能需要调用平台API获取历史消息）"""
-        # 由于API限制，这里暂时返回空列表
-        # 实际实现中可能需要调用特定平台的API来获取历史消息
-        return []
+    def _remove_recalled_message(self, group_id: str, user_id: str, message_id: str):
+        """从消息池中删除已撤回的消息"""
+        if group_id not in self.group_message_pools:
+            return
+        
+        if user_id not in self.group_message_pools[group_id]:
+            return
+        
+        # 标记消息为已撤回并从列表中移除
+        messages = self.group_message_pools[group_id][user_id]
+        for i, msg in enumerate(messages):
+            if msg.get("message_id") == message_id:
+                messages.pop(i)
+                logger.debug(f"已从消息池中删除撤回的消息: {message_id}")
+                break
     
     async def _extract_image_content(self, image_urls: List[str]) -> str:
         """使用自定义视觉模型提取图片内容"""
@@ -304,101 +546,57 @@ class SpamDetectorPlugin(Star):
             logger.error(f"图片内容提取失败: {e}")
             return ""
     
-    async def _is_spam_message(self, message_content: str, context_messages: List[str], image_content: str = "") -> bool:
-        """使用自定义文本模型判断是否为推销消息"""
+    async def _handle_spam_message_new(self, event: AstrMessageEvent, group_id: str, user_id: str, user_name: str) -> Optional[Comp.BaseMessageComponent]:
+        """处理检测到的推销消息 - 新的逻辑流程"""
         try:
-            # 检查文本模型配置
-            text_api_key = self._get_config_value("TEXT_MODEL_API_KEY", "")
-            if not text_api_key:
-                logger.warning("文本模型API Key未配置，无法进行推销检测")
-                return False
+            logger.info(f"开始处理推销消息，用户: {user_name} ({user_id})，群聊: {group_id}")
             
-            logger.debug(f"开始推销检测: message_content={message_content[:50]}..., image_content={image_content[:50]}...")
+            # 1. 先禁言用户
+            mute_duration = self._get_config_value("MUTE_DURATION", 600)  # 默认10分钟
+            logger.info(f"步骤1: 禁言用户 {user_id}，时长: {mute_duration} 秒")
+            await self._try_mute_user(event, user_id, mute_duration)
             
-            # 合并消息内容
-            full_content = message_content
-            if image_content:
-                full_content += f"\n\n图片内容：{image_content}"
+            # 2. 从消息池中获取该用户的所有消息并撤回
+            user_messages = self._get_user_messages_in_group(group_id, user_id)
+            logger.info(f"步骤2: 从消息池获取到用户 {user_id} 的 {len(user_messages)} 条消息")
             
-            # 构建上下文
-            context_text = ""
-            if context_messages:
-                context_text = f"\n\n最近的对话上下文：\n" + "\n".join(context_messages)
+            recall_count = 0
+            for message_record in user_messages:
+                message_id = message_record.get("message_id")
+                if message_id and not message_record.get("recalled"):
+                    try:
+                        success = await self._try_recall_message_by_id(event, message_id)
+                        if success:
+                            # 从消息池中删除撤回的消息
+                            self._remove_recalled_message(group_id, user_id, message_id)
+                            recall_count += 1
+                            logger.debug(f"成功撤回消息 {message_id}")
+                        await asyncio.sleep(0.1)  # 避免频繁调用API
+                    except Exception as e:
+                        logger.debug(f"撤回消息 {message_id} 失败: {e}")
+                        continue
             
-            # 获取系统提示词
-            system_prompt = self._get_config_value("LLM_SYSTEM_PROMPT",
-                """你是一个专业的推销信息检测助手。请分析给定的消息内容，判断它是否是推销信息。
- 
-推销信息的特征包括但不限于：
-1. 销售产品或服务
-2. 包含价格、优惠、折扣等商业信息
-3. 引导添加微信、QQ等联系方式进行交易
-4. 推广某个商品、品牌或服务
-5. 含有明显的营销意图
- 
-请只回答"是"或"否"，如果是推销信息回答"是"，如果不是推销信息回答"否"。""")
+            logger.info(f"步骤2完成: 已撤回 {recall_count} 条消息")
             
-            prompt = f"请判断以下消息是否为推销信息：\n\n{full_content}{context_text}"
+            # 3. 清理过期消息
+            current_time = time.time()
+            logger.info(f"步骤3: 清理群聊 {group_id} 的过期消息")
+            self._cleanup_expired_messages(group_id, current_time)
             
-            # 构建消息
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt}
-            ]
+            # 4. 发送警告消息
+            alert_message = self._get_config_value("SPAM_ALERT_MESSAGE",
+                "⚠️ 检测到疑似推销信息，相关消息已被处理，用户已被禁言。")
+            logger.info(f"步骤4: 发送警告消息")
             
-            logger.debug(f"发送给文本模型的提示词: {prompt[:200]}...")
-            
-            # 调用文本模型
-            result = await self._call_text_model(messages)
-            
-            if result:
-                result = result.strip().lower()
-                is_spam = "是" in result or "yes" in result or "spam" in result
-                logger.info(f"推销检测模型返回结果: '{result}', 判断为推销: {is_spam}")
-                return is_spam
-            else:
-                logger.warning("推销检测模型未返回结果")
-                
-        except Exception as e:
-            logger.error(f"推销检测失败: {e}", exc_info=True)
-        
-        return False
-    
-    async def _handle_spam_message(self, event: AstrMessageEvent, user_id: str, user_name: str) -> Optional[Comp.BaseMessageComponent]:
-        """处理检测到的推销消息"""
-        try:
-            logger.info(f"开始处理推销消息，用户: {user_name} ({user_id})")
-            
-            # 1. 获取用户最近的消息
-            last_time = self._get_config_value("LAST_TIME", 5)
-            forward_messages = self._get_forward_messages(user_id, last_time)
-            logger.info(f"获取到用于转发展示的消息 {len(forward_messages)} 条 (已过滤撤回/空内容)")
-            
-            # 2. 转发到管理员群（若配置）
+            # 5. 转发到管理员群（如果配置）
             admin_chat_id = self._get_config_value("ADMIN_CHAT_ID", "")
             if admin_chat_id:
-                logger.info(f"步骤2: 转发推销消息到管理员群: {admin_chat_id}")
+                logger.info(f"步骤5: 转发推销消息到管理员群: {admin_chat_id}")
+                # 获取被撤回前的消息内容用于转发
+                forward_messages = [msg["content"] for msg in user_messages if msg["content"].strip()]
                 await self._forward_to_admin(admin_chat_id, user_name, user_id, forward_messages, event)
             else:
-                logger.warning("步骤2: 管理员群聊ID未配置，无法转发推销消息")
-            
-            # 3. 撤回当前消息并发送警告消息（如果平台支持）
-            logger.info("步骤3: 尝试撤回触发消息并发送警告")
-            await self._try_recall_message(event)
-            
-            # 发送警告消息（只在撤回当前消息时发送）
-            alert_message = self._get_config_value("SPAM_ALERT_MESSAGE",
-                "⚠️ 检测到疑似推销信息，该消息已被处理，用户已被禁言。")
-            logger.info(f"发送警告消息: {alert_message}")
-            
-            # 4. 撤回用户最近的所有消息（如果平台支持）
-            logger.info("步骤4: 尝试撤回历史消息")
-            await self._try_recall_recent_messages(event, user_id, last_time)
-            
-            # 5. 禁言用户（如果平台支持）
-            mute_duration = self._get_config_value("MUTE_DURATION", 600)  # 默认10分钟
-            logger.info(f"步骤5: 尝试禁言用户 {mute_duration} 秒")
-            await self._try_mute_user(event, user_id, mute_duration)
+                logger.warning("步骤5: 管理员群聊ID未配置，无法转发推销消息")
             
             # 返回警告消息结果
             return event.plain_result(alert_message)
@@ -406,6 +604,25 @@ class SpamDetectorPlugin(Star):
         except Exception as e:
             logger.error(f"处理推销消息时出错: {e}", exc_info=True)
             return event.plain_result("❌ 处理推销消息时发生错误，请检查日志")
+    
+    async def _try_recall_message_by_id(self, event: AstrMessageEvent, message_id: str) -> bool:
+        """尝试根据消息ID撤回消息"""
+        try:
+            platform_name = event.get_platform_name()
+            if platform_name == "aiocqhttp":
+                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
+                if isinstance(event, AiocqhttpMessageEvent):
+                    client = event.bot
+                    payloads = {
+                        "message_id": message_id,
+                    }
+                    ret = await client.api.call_action('delete_msg', **payloads)
+                    logger.debug(f"撤回消息 {message_id} 返回: {ret}")
+                    return True
+            return False
+        except Exception as e:
+            logger.debug(f"撤回消息 {message_id} 失败: {e}")
+            return False
     
     async def _forward_to_admin(self, admin_chat_id: str, user_name: str, user_id: str,
                                 recent_messages: List[str], event: AstrMessageEvent):
@@ -454,92 +671,6 @@ class SpamDetectorPlugin(Star):
             
         except Exception as e:
             logger.error(f"转发到管理员群失败: {e}", exc_info=True)
-    
-    async def _try_recall_message(self, event: AstrMessageEvent):
-        """尝试撤回消息（如果平台支持）"""
-        logger.info(f"执行 _try_recall_message，消息ID={getattr(event.message_obj, 'message_id', None)}")
-        try:
-            if event.get_platform_name() == "aiocqhttp":
-                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
-                if isinstance(event, AiocqhttpMessageEvent):
-                    client = event.bot
-                    payloads = {
-                        "message_id": event.message_obj.message_id,
-                    }
-                    ret = await client.api.call_action('delete_msg', **payloads)
-                    logger.info(f"撤回单条消息，id={payloads['message_id']} 返回: {ret}")
-                    # 标记已撤回
-                    sender_id = event.get_sender_id()
-                    msg_id = event.message_obj.message_id
-                    if sender_id in self.user_message_history:
-                        for msg in self.user_message_history[sender_id]:
-                            if msg.get("message_id") == msg_id:
-                                msg["recalled"] = True
-                                break
-        except Exception as e:
-            logger.warning(f"撤回消息失败: {e}")
-    
-    async def _try_recall_recent_messages(self, event: AstrMessageEvent, user_id: str, last_minutes: int):
-        """尝试撤回用户最近的所有消息"""
-        logger.info(f"执行 _try_recall_recent_messages，用户={user_id}, 时间范围={last_minutes}分钟")
-        try:
-            platform_name = event.get_platform_name()
-            logger.info(f"尝试撤回用户 {user_id} 最近 {last_minutes} 分钟的消息，平台: {platform_name}")
-            
-            if platform_name == "aiocqhttp":
-                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
-                if isinstance(event, AiocqhttpMessageEvent):
-                    client = event.bot
-                    group_id = event.get_group_id()
-                    
-                    if group_id and user_id in self.user_message_history:
-                        cutoff_time = time.time() - (last_minutes * 60)
-                        # 包含当前消息
-                        recent_messages = [
-                            msg for msg in self.user_message_history[user_id]
-                            if msg["timestamp"] >= cutoff_time and msg.get("message_id")
-                        ]
-                        
-                        logger.info(f"找到用户 {user_id} 需要撤回的消息: {len(recent_messages)} 条")
-                        
-                        recall_count = 0
-                        failed_count = 0
-                        for msg in recent_messages:
-                            try:
-                                logger.debug(f"正在撤回消息ID: {msg['message_id']}")
-                                # message_id 可能为非纯数字字符串，直接使用原始值
-                                payloads = {
-                                    "message_id": msg["message_id"],
-                                }
-                                ret = await client.api.call_action('delete_msg', **payloads)
-                                logger.debug(f"撤回消息 {payloads['message_id']} 返回: {ret}")
-                                recall_count += 1
-                                logger.debug(f"成功撤回消息 {msg['message_id']}: {msg['content'][:30]}...")
-                                msg["recalled"] = True
-                                # 避免频繁调用API
-                                await asyncio.sleep(0.1)
-                            except Exception as e:
-                                failed_count += 1
-                                # 检查具体的错误类型，记录但不重试
-                                if "1200" in str(e) or "Recall failed" in str(e):
-                                    logger.debug(f"撤回消息 {msg['message_id']} 失败(可能超时或无权限): {msg['content'][:30]}...")
-                                elif "Timeout" in str(e):
-                                    logger.debug(f"撤回消息 {msg['message_id']} 超时: {msg['content'][:30]}...")
-                                else:
-                                    logger.debug(f"撤回消息 {msg['message_id']} 失败: {e}")
-                                # 失败后不重试，继续处理下一条消息
-                                continue
-                        
-                        if recall_count > 0:
-                            logger.info(f"✅ 已撤回用户 {user_id} 最近 {recall_count} 条消息 (失败 {failed_count} 条)")
-                        else:
-                            logger.info(f"⚠️ 未能撤回用户 {user_id} 的任何消息 (共 {failed_count} 条失败，可能是权限或时间限制)")
-                    else:
-                        logger.warning(f"无法撤回消息: 群聊ID或用户历史消息不存在")
-            else:
-                logger.warning(f"平台 {platform_name} 不支持消息撤回功能")
-        except Exception as e:
-            logger.error(f"批量撤回消息失败: {e}", exc_info=True)
     
     async def _try_mute_user(self, event: AstrMessageEvent, user_id: str, duration: int):
         """尝试禁言用户（如果平台支持）"""
@@ -603,20 +734,23 @@ class SpamDetectorPlugin(Star):
                 return
             logger.debug(f"用户 {user_id} 不在白名单中")
             
-            # 存储用户消息，使用 raw_message 中的数字 message_id
+            # 获取消息ID
             raw_msg = getattr(event.message_obj, 'raw_message', {})
             msg_id = None
             if isinstance(raw_msg, dict) and 'message_id' in raw_msg:
                 msg_id = raw_msg['message_id']
             else:
                 msg_id = getattr(event.message_obj, 'message_id', '')
-
-            # 去重：如果该消息ID已经处理过，直接跳过
-            if msg_id and msg_id in self.processed_messages:
-                logger.debug(f"消息 {msg_id} 已处理过，跳过")
+            
+            # 将消息添加到对应群聊的消息池
+            self._add_message_to_pool(group_id, user_id, message_content, timestamp, str(msg_id) if msg_id else "")
+            logger.debug(f"已将消息添加到群聊 {group_id} 用户 {user_id} 的消息池")
+                
+            # 检查队列大小，避免积压过多
+            max_queue_size = int(self._get_config_value("MAX_DETECTION_QUEUE_SIZE", 50))
+            if self.detection_queue.qsize() >= max_queue_size:
+                logger.warning(f"检测队列已满 ({self.detection_queue.qsize()})，跳过当前消息")
                 return
-            self._store_user_message(user_id, message_content, timestamp, msg_id)
-            logger.debug(f"已存储用户 {user_id} 的消息，消息ID: {msg_id}")
             
             # 提取图片内容
             image_urls = []
@@ -636,26 +770,11 @@ class SpamDetectorPlugin(Star):
                 else:
                     logger.debug("图片内容提取失败或无内容")
             
-            # 获取上下文消息
-            context_count = self._get_config_value("CONTEXT_MESSAGE_COUNT", 1)
-            context_messages = await self._get_context_messages(event, context_count)
-            logger.debug(f"获取到 {len(context_messages)} 条上下文消息")
-            
-            # 检测是否为推销消息
-            logger.debug(f"开始检测推销消息: {message_content[:50]}...")
-            is_spam = await self._is_spam_message(message_content, context_messages, image_content)
-            
-            if is_spam:
-                logger.info(f"🚨 检测到推销消息，用户: {user_name} ({user_id}), 内容: {message_content}")
-                # 记录已处理消息ID
-                if msg_id:
-                    self.processed_messages[msg_id] = time.time()
-                self.user_last_spam_handle[user_id] = time.time()
-                result = await self._handle_spam_message(event, user_id, user_name)
-                if result:
-                    yield result
-            else:
-                logger.debug(f"消息检测结果: 非推销消息")
+            # 将检测任务加入队列：(群聊ID, 用户ID, 用户名, 消息内容, 发送时间, 事件对象, 图片内容)
+            logger.debug(f"将消息加入检测队列: {message_content[:50]}...")
+            detection_task = (group_id, user_id, user_name, message_content, timestamp, event, image_content)
+            await self.detection_queue.put(detection_task)
+            logger.debug(f"消息已加入队列，当前队列大小: {self.detection_queue.qsize()}")
                 
         except Exception as e:
             logger.error(f"处理群聊消息时出错: {e}", exc_info=True)
@@ -679,7 +798,11 @@ class SpamDetectorPlugin(Star):
                 return
                 
             logger.info(f"开始测试推销检测: {message}")
-            is_spam = await self._is_spam_message(message, [], "")
+            # 使用批量检测方法测试单条消息
+            test_user_id = "test_user"
+            test_batch_input = {test_user_id: message}
+            spam_user_ids = await self._batch_spam_detection(test_batch_input)
+            is_spam = test_user_id in spam_user_ids
             result = "✅ 是推销信息" if is_spam else "❌ 不是推销信息"
             yield event.plain_result(f"🔍 推销检测结果: {result}\n测试消息: {message}")
         except Exception as e:
@@ -697,7 +820,7 @@ class SpamDetectorPlugin(Star):
             admin_chat_id = self._get_config_value("ADMIN_CHAT_ID", "")
             config_status.append(f"管理员群聊ID: {'已配置' if admin_chat_id else '❌ 未配置'} ({admin_chat_id})")
             
-            group_whitelist = self._get_config_value("GROUP_WHITELIST", [])
+            group_whitelist = self._get_config_value("WHITELIST_GROUPS", [])
             config_status.append(f"群聊白名单: {len(group_whitelist)} 个群聊")
             
             user_whitelist = self._get_config_value("WHITELIST_USERS", [])
@@ -716,9 +839,15 @@ class SpamDetectorPlugin(Star):
                 is_group_whitelisted = self._is_group_whitelisted(current_group)
                 config_status.append(f"当前群聊 {current_group}: {'✅ 在白名单中' if is_group_whitelisted else '❌ 不在白名单中'}")
             
-            # 检查消息历史
-            total_cached_users = len(self.user_message_history)
-            config_status.append(f"缓存用户消息: {total_cached_users} 个用户")
+            # 检查消息池状态
+            total_groups = len(self.group_message_pools)
+            total_users = sum(len(users) for users in self.group_message_pools.values())
+            total_messages = sum(
+                len(messages) for group in self.group_message_pools.values() 
+                for messages in group.values()
+            )
+            config_status.append(f"消息池: {total_groups} 个群聊, {total_users} 个用户, {total_messages} 条消息")
+            config_status.append(f"检测队列: {self.detection_queue.qsize()} 个待处理任务")
             
             debug_info = "🔧 推销插件调试信息:\n" + "\n".join(f"• {status}" for status in config_status)
             yield event.plain_result(debug_info)
@@ -753,5 +882,17 @@ class SpamDetectorPlugin(Star):
     
     async def terminate(self):
         """插件卸载时的清理工作"""
+        logger.info("防推销插件正在停止...")
+        
+        # 停止队列处理器
+        self.detection_worker_running = False
+        
+        # 等待队列中剩余任务完成
+        if not self.detection_queue.empty():
+            logger.info(f"等待队列中剩余 {self.detection_queue.qsize()} 个任务完成...")
+            await self.detection_queue.join()
+        
+        # 清理消息池
+        self.group_message_pools.clear()
+        
         logger.info("防推销插件已停止")
-        self.user_message_history.clear()
