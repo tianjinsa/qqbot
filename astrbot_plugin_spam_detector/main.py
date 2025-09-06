@@ -564,7 +564,7 @@ class SpamDetectorPlugin(Star):
                     ] + processed_images
                 }
             ]
-            
+            logger.info(f"发送给视觉模型消息messages: {messages}")
             # 调用视觉模型
             result = await self._call_vision_model(messages)
             return result or ""
