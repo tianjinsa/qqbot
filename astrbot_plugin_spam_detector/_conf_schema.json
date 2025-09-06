@@ -1,0 +1,40 @@
+{
+  "LAST_TIME": {
+    "description": "检测到推销后，回溯该用户消息的时间范围（分钟）",
+    "type": "int",
+    "default": 5,
+    "hint": "当检测到推销信息时，会收集该用户在这个时间范围内发送的所有消息一并转发给管理员"
+  },
+  "ADMIN_CHAT_ID": {
+    "description": "管理员群聊ID",
+    "type": "string",
+    "hint": "推销消息将被转发到这个群聊，请填入群聊的完整ID",
+    "obvious_hint": true
+  },
+  "SPAM_ALERT_MESSAGE": {
+    "description": "在原群聊发送的提示信息内容",
+    "type": "text",
+    "default": "⚠️ 检测到疑似推销信息，该消息已被处理。",
+    "hint": "当检测到推销信息后，在原群聊发送的警告消息"
+  },
+  "CONTEXT_MESSAGE_COUNT": {
+    "description": "上下文消息数量",
+    "type": "int",
+    "default": 1,
+    "hint": "每次调用大模型时，除当前消息外，额外包含的最近上下文消息数量，有助于提高检测准确性"
+  },
+  "WHITELIST_USERS": {
+    "description": "白名单用户列表",
+    "type": "list",
+    "default": [],
+    "hint": "在此列表中的用户ID将不会被进行推销检测。可以逗号分隔输入多个用户ID，或使用管理命令添加"
+  },
+  "LLM_SYSTEM_PROMPT": {
+    "description": "大模型系统提示词",
+    "type": "text",
+    "default": "你是一个专业的推销信息检测助手。请分析给定的消息内容，判断它是否是推销信息。\n\n推销信息的特征包括但不限于：\n1. 销售产品或服务\n2. 包含价格、优惠、折扣等商业信息\n3. 引导添加微信、QQ等联系方式进行交易\n4. 推广某个商品、品牌或服务\n5. 含有明显的营销意图\n\n请只回答\"是\"或\"否\"，如果是推销信息回答\"是\"，如果不是推销信息回答\"否\"。",
+    "hint": "自定义大模型的系统提示词，用于引导模型更好地判断推销信息。建议保持简洁明确的指令格式",
+    "editor_mode": true,
+    "editor_language": "text"
+  }
+}

@@ -1,0 +1,5 @@
+name: astrbot_plugin_spam_detector
+desc: 智能防推销插件，使用AI检测并自动处理群聊中的推销信息，支持白名单、消息转发、自动撤回等功能。
+version: v1.0.0
+author: tianjinsa
+repo: https://github.com/tianjinsa/qqbot
