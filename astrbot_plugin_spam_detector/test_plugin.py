@@ -124,7 +124,8 @@ def test_main_structure():
             "async def on_group_message(self, event: AstrMessageEvent):",
             "_is_user_whitelisted",
             "_is_spam_message",
-            "_handle_spam_message"
+            "_handle_spam_message",
+            "from astrbot.api import logger, AstrBotConfig"
         ]
         
         missing_patterns = []
