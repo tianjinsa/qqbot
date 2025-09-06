@@ -151,17 +151,21 @@ class SpamDetectorPlugin(Star):
             last_time = self._get_config_value("LAST_TIME", 5)
             recent_messages = self._get_user_recent_messages(user_id, last_time)
             
-            # 2. 转发到管理员群
+            # 2. 撤回用户最近的所有消息（如果平台支持）
+            await self._try_recall_recent_messages(event, user_id, last_time)
+            
+            # 3. 禁言用户（如果平台支持）
+            mute_duration = self._get_config_value("MUTE_DURATION", 600)  # 默认10分钟
+            await self._try_mute_user(event, user_id, mute_duration)
+            
+            # 4. 转发到管理员群
             admin_chat_id = self._get_config_value("ADMIN_CHAT_ID", "")
             if admin_chat_id:
                 await self._forward_to_admin(admin_chat_id, user_name, user_id, recent_messages, event)
             
-            # 3. 撤回原消息（如果平台支持）
-            await self._try_recall_message(event)
-            
-            # 4. 发送警告消息
+            # 5. 发送警告消息
             alert_message = self._get_config_value("SPAM_ALERT_MESSAGE", 
-                "⚠️ 检测到疑似推销信息，该消息已被处理。")
+                "⚠️ 检测到疑似推销信息，该消息已被处理，用户已被禁言。")
             yield event.plain_result(alert_message)
             
         except Exception as e:
@@ -196,19 +200,82 @@ class SpamDetectorPlugin(Star):
     async def _try_recall_message(self, event: AstrMessageEvent):
         """尝试撤回消息（如果平台支持）"""
         try:
-            platform_name = event.get_platform_name()
-            if platform_name == "aiocqhttp":
-                # 对于aiocqhttp平台，尝试撤回消息
+            if event.get_platform_name() == "aiocqhttp":
                 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
                 if isinstance(event, AiocqhttpMessageEvent):
                     client = event.bot
                     payloads = {
                         "message_id": event.message_obj.message_id,
                     }
-                    await client.api.call_action('delete_msg', **payloads)
+                    ret = await client.api.call_action('delete_msg', **payloads)
                     logger.info(f"已撤回推销消息: {event.message_obj.message_id}")
         except Exception as e:
-            logger.warning(f"撤回消息失败（可能平台不支持）: {e}")
+            logger.warning(f"撤回消息失败: {e}")
+    
+    async def _try_recall_recent_messages(self, event: AstrMessageEvent, user_id: str, last_minutes: int):
+        """尝试撤回用户最近的所有消息"""
+        try:
+            if event.get_platform_name() == "aiocqhttp":
+                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
+                if isinstance(event, AiocqhttpMessageEvent):
+                    client = event.bot
+                    group_id = event.get_group_id()
+                    
+                    if group_id and user_id in self.user_message_history:
+                        cutoff_time = time.time() - (last_minutes * 60)
+                        recent_messages = [
+                            msg for msg in self.user_message_history[user_id]
+                            if msg["timestamp"] > cutoff_time and msg.get("message_id")
+                        ]
+                        
+                        recall_count = 0
+                        for msg in recent_messages:
+                            try:
+                                payloads = {
+                                    "message_id": msg["message_id"],
+                                }
+                                ret = await client.api.call_action('delete_msg', **payloads)
+                                recall_count += 1
+                                # 避免频繁调用API
+                                await asyncio.sleep(0.1)
+                            except Exception as e:
+                                logger.warning(f"撤回消息 {msg['message_id']} 失败: {e}")
+                        
+                        if recall_count > 0:
+                            logger.info(f"已撤回用户 {user_id} 最近 {recall_count} 条消息")
+        except Exception as e:
+            logger.warning(f"批量撤回消息失败: {e}")
+    
+    async def _try_mute_user(self, event: AstrMessageEvent, user_id: str, duration: int):
+        """尝试禁言用户（如果平台支持）"""
+        try:
+            if event.get_platform_name() == "aiocqhttp":
+                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
+                if isinstance(event, AiocqhttpMessageEvent):
+                    client = event.bot
+                    group_id = event.get_group_id()
+                    
+                    if group_id:
+                        payloads = {
+                            "group_id": int(group_id),
+                            "user_id": int(user_id),
+                            "duration": duration  # 禁言时长（秒）
+                        }
+                        ret = await client.api.call_action('set_group_ban', **payloads)
+                        
+                        # 计算禁言时长的可读格式
+                        if duration >= 3600:
+                            duration_str = f"{duration // 3600}小时{(duration % 3600) // 60}分钟"
+                        elif duration >= 60:
+                            duration_str = f"{duration // 60}分钟"
+                        else:
+                            duration_str = f"{duration}秒"
+                        
+                        logger.info(f"已禁言用户 {user_id}，时长: {duration_str}")
+            else:
+                logger.warning(f"平台 {event.get_platform_name()} 不支持禁言功能")
+        except Exception as e:
+            logger.warning(f"禁言用户失败: {e}")
     
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def on_group_message(self, event: AstrMessageEvent):
@@ -255,66 +322,21 @@ class SpamDetectorPlugin(Star):
         except Exception as e:
             logger.error(f"处理群聊消息时出错: {e}")
     
-    @filter.command("spam_whitelist", alias={"垃圾白名单", "推销白名单"})
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    async def manage_whitelist(self, event: AstrMessageEvent, action: str = "", user_id: str = ""):
-        """管理推销检测白名单"""
-        try:
-            if action == "add" and user_id:
-                # 添加到白名单
-                whitelist = self._get_config_value("WHITELIST_USERS", [])
-                if isinstance(whitelist, str):
-                    whitelist = [uid.strip() for uid in whitelist.split(",") if uid.strip()]
-                
-                if user_id not in whitelist:
-                    whitelist.append(user_id)
-                    self.config["WHITELIST_USERS"] = whitelist
-                    self.config.save_config()
-                    yield event.plain_result(f"✅ 用户 {user_id} 已添加到推销检测白名单")
-                else:
-                    yield event.plain_result(f"ℹ️ 用户 {user_id} 已在白名单中")
-                    
-            elif action == "remove" and user_id:
-                # 从白名单移除
-                whitelist = self._get_config_value("WHITELIST_USERS", [])
-                if isinstance(whitelist, str):
-                    whitelist = [uid.strip() for uid in whitelist.split(",") if uid.strip()]
-                
-                if user_id in whitelist:
-                    whitelist.remove(user_id)
-                    self.config["WHITELIST_USERS"] = whitelist
-                    self.config.save_config()
-                    yield event.plain_result(f"✅ 用户 {user_id} 已从推销检测白名单移除")
-                else:
-                    yield event.plain_result(f"ℹ️ 用户 {user_id} 不在白名单中")
-                    
-            elif action == "list":
-                # 查看白名单
-                whitelist = self._get_config_value("WHITELIST_USERS", [])
-                if isinstance(whitelist, str):
-                    whitelist = [uid.strip() for uid in whitelist.split(",") if uid.strip()]
-                
-                if whitelist:
-                    yield event.plain_result(f"📋 推销检测白名单:\n" + "\n".join(f"- {uid}" for uid in whitelist))
-                else:
-                    yield event.plain_result("📋 推销检测白名单为空")
-            else:
-                yield event.plain_result(
-                    "📝 推销检测白名单管理命令:\n"
-                    "/spam_whitelist add <用户ID> - 添加用户到白名单\n"
-                    "/spam_whitelist remove <用户ID> - 从白名单移除用户\n"
-                    "/spam_whitelist list - 查看白名单"
-                )
-                
-        except Exception as e:
-            logger.error(f"管理白名单时出错: {e}")
-            yield event.plain_result("❌ 操作失败，请检查日志")
-    
     @filter.command("spam_test", alias={"推销测试"})
     @filter.permission_type(filter.PermissionType.ADMIN)
-    async def test_spam_detection(self, event: AstrMessageEvent, message: str):
+    async def test_spam_detection(self, event: AstrMessageEvent, message: str = ""):
         """测试推销检测功能"""
         try:
+            if not message:
+                yield event.plain_result(
+                    "📝 推销检测测试命令使用方法:\n"
+                    "/spam_test <消息内容> - 测试指定消息是否为推销信息\n\n"
+                    "示例:\n"
+                    "/spam_test 优质产品大促销，加微信享受8折优惠！\n"
+                    "/spam_test 今天天气真好"
+                )
+                return
+                
             is_spam = await self._is_spam_message(message, [], "")
             result = "✅ 是推销信息" if is_spam else "❌ 不是推销信息"
             yield event.plain_result(f"🔍 推销检测结果: {result}\n测试消息: {message}")

@@ -83,6 +83,7 @@ def test_config_schema():
             "LAST_TIME",
             "ADMIN_CHAT_ID", 
             "SPAM_ALERT_MESSAGE",
+            "MUTE_DURATION",
             "CONTEXT_MESSAGE_COUNT",
             "WHITELIST_USERS",
             "LLM_SYSTEM_PROMPT"
