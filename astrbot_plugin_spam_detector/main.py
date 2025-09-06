@@ -308,34 +308,23 @@ class SpamDetectorPlugin(Star):
                 "max_tokens": 1000
             }
             
-            # 调用文本模型，如果启用thinking模式则添加thinking参数
-            if thinking_enabled:
-                # 对于智谱AI等支持thinking的模型，直接添加thinking参数
-                api_params["thinking"] = {"type": "enabled"}
-                logger.debug("已启用thinking模式，API参数包含thinking字段")
-            
             logger.debug(f"最终API参数: {', '.join(api_params.keys())}")
             
             # 调用文本模型
-            try:
+            if thinking_enabled:
+                # 只使用extra_body方式传递thinking参数
+                try:
+                    logger.debug("使用extra_body方式启用thinking模式")
+                    response = await client.chat.completions.create(
+                        **api_params,
+                        extra_body={"thinking": {"type": "enabled"}}
+                    )
+                    logger.debug("成功使用extra_body方式启用thinking模式")
+                except Exception as e:
+                    logger.warning(f"extra_body thinking模式失败，回退到普通模式: {e}")
+                    response = await client.chat.completions.create(**api_params)
+            else:
                 response = await client.chat.completions.create(**api_params)
-            except TypeError as e:
-                if "thinking" in str(e) and thinking_enabled:
-                    # 如果thinking参数不被支持，移除它并重试
-                    logger.warning("当前OpenAI SDK版本不支持thinking参数，尝试使用extra_body方式")
-                    api_params_without_thinking = {k: v for k, v in api_params.items() if k != "thinking"}
-                    # 尝试使用extra_body传递thinking参数（适用于某些SDK版本）
-                    try:
-                        response = await client.chat.completions.create(
-                            **api_params_without_thinking,
-                            extra_body={"thinking": {"type": "enabled"}}
-                        )
-                        logger.debug("成功使用extra_body方式启用thinking模式")
-                    except Exception as extra_e:
-                        logger.warning(f"extra_body方式也失败，回退到普通模式: {extra_e}")
-                        response = await client.chat.completions.create(**api_params_without_thinking)
-                else:
-                    raise e
             
             if response.choices and len(response.choices) > 0:
                 logger.debug(f"文本模型调用成功，返回内容: {response.choices[0].message.content[:100]}...")
@@ -394,34 +383,23 @@ class SpamDetectorPlugin(Star):
                 "max_tokens": 1000
             }
             
-            # 调用视觉模型，如果启用thinking模式则添加thinking参数
-            if thinking_enabled:
-                # 对于智谱AI等支持thinking的模型，直接添加thinking参数
-                api_params["thinking"] = {"type": "enabled"}
-                logger.debug("已启用thinking模式，API参数包含thinking字段")
-            
             logger.debug(f"最终API参数: {', '.join(api_params.keys())}")
             
             # 调用视觉模型
-            try:
+            if thinking_enabled:
+                # 只使用extra_body方式传递thinking参数
+                try:
+                    logger.debug("使用extra_body方式启用thinking模式")
+                    response = await client.chat.completions.create(
+                        **api_params,
+                        extra_body={"thinking": {"type": "enabled"}}
+                    )
+                    logger.debug("成功使用extra_body方式启用thinking模式")
+                except Exception as e:
+                    logger.warning(f"extra_body thinking模式失败，回退到普通模式: {e}")
+                    response = await client.chat.completions.create(**api_params)
+            else:
                 response = await client.chat.completions.create(**api_params)
-            except TypeError as e:
-                if "thinking" in str(e) and thinking_enabled:
-                    # 如果thinking参数不被支持，移除它并重试
-                    logger.warning("当前OpenAI SDK版本不支持thinking参数，尝试使用extra_body方式")
-                    api_params_without_thinking = {k: v for k, v in api_params.items() if k != "thinking"}
-                    # 尝试使用extra_body传递thinking参数（适用于某些SDK版本）
-                    try:
-                        response = await client.chat.completions.create(
-                            **api_params_without_thinking,
-                            extra_body={"thinking": {"type": "enabled"}}
-                        )
-                        logger.debug("成功使用extra_body方式启用thinking模式")
-                    except Exception as extra_e:
-                        logger.warning(f"extra_body方式也失败，回退到普通模式: {extra_e}")
-                        response = await client.chat.completions.create(**api_params_without_thinking)
-                else:
-                    raise e
             
             if response.choices and len(response.choices) > 0:
                 logger.debug(f"视觉模型调用成功，返回内容: {response.choices[0].message.content[:100]}...")
@@ -843,7 +821,7 @@ class SpamDetectorPlugin(Star):
                 logger.debug(f"检测到图片: {len(image_urls)} 张")
                 image_content = await self._extract_image_content(image_urls)
                 if image_content:
-                    logger.debug(f"图片内容提取成功: {image_content[:100]}...")
+                    logger.info(f"图片内容提取成功: {image_content[:100]}...")
                 else:
                     logger.debug("图片内容提取失败或无内容")
             
