@@ -1,5 +1,5 @@
 # AstrBot 防推销插件依赖
 # OpenAI Python包，用于调用文本和视觉模型
-openai>=1.0.0
+openai>=1.106.1
 # HTTP请求库，用于调用自定义的文本和视觉模型API
 aiohttp>=3.8.0
