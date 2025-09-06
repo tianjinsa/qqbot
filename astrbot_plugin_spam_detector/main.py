@@ -19,11 +19,13 @@ class SpamDetectorPlugin(Star):
         super().__init__(context)
         self.config = config
         # 用户消息历史缓存 (用户ID -> 消息列表)
-    self.user_message_history = {}  # type: Dict[str, List[Dict[str, Any]]]
-    # 已处理过的消息ID -> 时间戳，用于防止重复处理
-    self.processed_messages = {}  # type: Dict[str, float]
-    # 用户最近一次被判定为推销并处理的时间（可用于频繁触发保护）
-    self.user_last_spam_handle = {}  # type: Dict[str, float]
+        self.user_message_history = {}  # type: Dict[str, List[Dict[str, Any]]]
+        # 已处理过的消息ID -> 时间戳，用于防止重复处理
+        self.processed_messages = {}  # type: Dict[str, float]
+        # 用户最近一次被判定为推销并处理的时间（可用于频繁触发保护）
+        self.user_last_spam_handle = {}  # type: Dict[str, float]
+        # 上次全局清理时间
+        self.last_cleanup_time = 0.0
         
     async def initialize(self):
         """插件初始化"""
