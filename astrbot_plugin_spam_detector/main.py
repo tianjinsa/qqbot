@@ -298,7 +298,7 @@ class SpamDetectorPlugin(Star):
         
         return False
     
-    async def _handle_spam_message(self, event: AstrMessageEvent, user_id: str, user_name: str):
+    async def _handle_spam_message(self, event: AstrMessageEvent, user_id: str, user_name: str) -> Optional[Comp.BaseMessageComponent]:
         """处理检测到的推销消息"""
         try:
             logger.info(f"开始处理推销消息，用户: {user_name} ({user_id})")
@@ -329,11 +329,11 @@ class SpamDetectorPlugin(Star):
             alert_message = self._get_config_value("SPAM_ALERT_MESSAGE",
                 "⚠️ 检测到疑似推销信息，该消息已被处理，用户已被禁言。")
             logger.info(f"步骤5: 发送警告消息: {alert_message}")
-            yield event.plain_result(alert_message)
+            return event.plain_result(alert_message)
             
         except Exception as e:
             logger.error(f"处理推销消息时出错: {e}", exc_info=True)
-            yield event.plain_result("❌ 处理推销消息时发生错误，请检查日志")
+            return event.plain_result("❌ 处理推销消息时发生错误，请检查日志")
     
     async def _forward_to_admin(self, admin_chat_id: str, user_name: str, user_id: str, 
                               recent_messages: List[str], event: AstrMessageEvent):
@@ -399,9 +399,10 @@ class SpamDetectorPlugin(Star):
                     
                     if group_id and user_id in self.user_message_history:
                         cutoff_time = time.time() - (last_minutes * 60)
+                        # 包含当前消息
                         recent_messages = [
                             msg for msg in self.user_message_history[user_id]
-                            if msg["timestamp"] > cutoff_time and msg.get("message_id")
+                            if msg["timestamp"] >= cutoff_time and msg.get("message_id")
                         ]
                         
                         logger.info(f"找到用户 {user_id} 需要撤回的消息: {len(recent_messages)} 条")
@@ -411,13 +412,13 @@ class SpamDetectorPlugin(Star):
                             try:
                                 logger.debug(f"正在撤回消息ID: {msg['message_id']}")
                                 payloads = {
-                                    "message_id": msg["message_id"],
+                                    "message_id": int(msg["message_id"]),
                                 }
                                 ret = await client.api.call_action('delete_msg', **payloads)
                                 recall_count += 1
                                 logger.debug(f"成功撤回消息 {msg['message_id']}: {msg['content'][:30]}...")
                                 # 避免频繁调用API
-                                await asyncio.sleep(0.1)
+                                await asyncio.sleep(0.2)
                             except Exception as e:
                                 logger.warning(f"撤回消息 {msg['message_id']} 失败: {e}")
                         
@@ -527,7 +528,8 @@ class SpamDetectorPlugin(Star):
             
             if is_spam:
                 logger.info(f"🚨 检测到推销消息，用户: {user_name} ({user_id}), 内容: {message_content}")
-                async for result in self._handle_spam_message(event, user_id, user_name):
+                result = await self._handle_spam_message(event, user_id, user_name)
+                if result:
                     yield result
             else:
                 logger.debug(f"消息检测结果: 非推销消息")
