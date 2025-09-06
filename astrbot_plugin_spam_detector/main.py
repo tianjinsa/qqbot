@@ -232,7 +232,7 @@ class SpamDetectorPlugin(Star):
 4. 推广某个商品、品牌或服务
 5. 含有明显的营销意图
 
-请分析所有消息，找出其中的推销信息，并返回一个JSON格式的结果，格式为：{"y":[用户ID1,用户ID2,...]}
+请分析所有消息，找出其中的推销信息，并返回一个JSON格式的结果(不是md格式)，格式为：{"y":[用户ID1,用户ID2,...]}
 其中y数组包含所有被识别为推销信息的用户ID。如果没有推销信息，返回{"y":[]}""")
             
             prompt = f"请分析以下批量消息，识别出推销信息的用户ID：\n\n{batch_content}"
@@ -711,18 +711,22 @@ class SpamDetectorPlugin(Star):
             if not processed_images:
                 return ""
             
-            # 构建符合GLM-4.1v格式的消息
+            # 获取视觉模型系统提示词配置
+            system_prompt = self._get_config_value("VISION_MODEL_SYSTEM_PROMPT", "你是一个图片内容识别助手，请客观描述图片内容，特别是提取其中的文字信息。")
+            user_prompt = self._get_config_value("VISION_MODEL_USER_PROMPT", "请描述这张图片的主要内容，特别是如果有文字请完整提取出来。")
+            
+            # 构建符合视觉模型格式的消息
             messages = [
                 {
                     "role": "system",
-                    "content": "你是一个图片内容识别助手，请客观描述图片内容，特别是提取其中的文字信息。"
+                    "content": system_prompt
                 },
                 {
                     "role": "user", 
                     "content": [
                         {
                             "type": "text",
-                            "text": "请描述这张图片的主要内容，特别是如果有文字请完整提取出来。"
+                            "text": user_prompt
                         }
                     ] + processed_images
                 }
