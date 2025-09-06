@@ -52,7 +52,7 @@ class SpamDetectorPlugin(Star):
             response = await client.chat.completions.create(
                 model=model_id,
                 messages=messages,
-                temperature=0.4,
+                temperature=0.7,
                 max_tokens=1000
             )
             
@@ -94,7 +94,7 @@ class SpamDetectorPlugin(Star):
             response = await client.chat.completions.create(
                 model=model_id,
                 messages=messages,
-                temperature=0.4,
+                temperature=0.7,
                 max_tokens=1000
             )
             
@@ -308,8 +308,11 @@ class SpamDetectorPlugin(Star):
             recent_messages = self._get_user_recent_messages(user_id, last_time)
             logger.info(f"获取到用户 {user_id} 最近 {last_time} 分钟内的 {len(recent_messages)} 条消息")
             
-            # 2. 撤回用户最近的所有消息（如果平台支持）
-            logger.info("步骤2: 尝试撤回消息")
+            # 2. 撤回当前消息（如果平台支持）
+            logger.info("步骤2: 尝试撤回触发消息")
+            await self._try_recall_message(event)
+            # 3. 撤回用户最近的所有消息（如果平台支持）
+            logger.info("步骤3: 尝试撤回历史消息")
             await self._try_recall_recent_messages(event, user_id, last_time)
             
             # 3. 禁言用户（如果平台支持）
@@ -335,14 +338,14 @@ class SpamDetectorPlugin(Star):
             logger.error(f"处理推销消息时出错: {e}", exc_info=True)
             return event.plain_result("❌ 处理推销消息时发生错误，请检查日志")
     
-    async def _forward_to_admin(self, admin_chat_id: str, user_name: str, user_id: str, 
-                              recent_messages: List[str], event: AstrMessageEvent):
+    async def _forward_to_admin(self, admin_chat_id: str, user_name: str, user_id: str,
+                                recent_messages: List[str], event: AstrMessageEvent):
         """转发消息到管理员群"""
+        logger.info(f"执行 _forward_to_admin，admin_chat_id={admin_chat_id}, user_id={user_id}")
         try:
             if not admin_chat_id:
                 logger.warning("管理员群聊ID未配置，无法转发消息")
                 return
-                
             group_id = event.get_group_id()
             
             # 构建转发内容
@@ -356,22 +359,26 @@ class SpamDetectorPlugin(Star):
             for i, msg in enumerate(recent_messages, 1):
                 forward_content += f"{i}. {msg}\n"
             
-            # 构建统一消息来源标识符
+            # 构建统一消息来源标识符，使用正确的消息类型 group
             admin_unified_origin = f"{event.get_platform_name()}:group:{admin_chat_id}"
             
             # 使用正确的MessageChain导入和发送方式
             from astrbot.api.event import MessageChain
             message_chain = MessageChain().message(forward_content)
             
-            logger.info(f"正在转发推销报告到管理员群: {admin_unified_origin}")
-            await self.context.send_message(admin_unified_origin, message_chain)
-            logger.info("推销报告转发成功")
+            logger.info(f"准备向管理员群发送推销报告，目标origin: {admin_unified_origin}")
+            try:
+                ret = await self.context.send_message(admin_unified_origin, message_chain)
+                logger.info(f"推销报告转发结果: {ret}")
+            except Exception as send_exc:
+                logger.error(f"转发推销报告到 {admin_unified_origin} 失败: {send_exc}", exc_info=True)
             
         except Exception as e:
             logger.error(f"转发到管理员群失败: {e}", exc_info=True)
     
     async def _try_recall_message(self, event: AstrMessageEvent):
         """尝试撤回消息（如果平台支持）"""
+        logger.info(f"执行 _try_recall_message，消息ID={getattr(event.message_obj, 'message_id', None)}")
         try:
             if event.get_platform_name() == "aiocqhttp":
                 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
@@ -381,12 +388,13 @@ class SpamDetectorPlugin(Star):
                         "message_id": event.message_obj.message_id,
                     }
                     ret = await client.api.call_action('delete_msg', **payloads)
-                    logger.info(f"已撤回推销消息: {event.message_obj.message_id}")
+                    logger.info(f"撤回单条消息，id={payloads['message_id']} 返回: {ret}")
         except Exception as e:
             logger.warning(f"撤回消息失败: {e}")
     
     async def _try_recall_recent_messages(self, event: AstrMessageEvent, user_id: str, last_minutes: int):
         """尝试撤回用户最近的所有消息"""
+        logger.info(f"执行 _try_recall_recent_messages，用户={user_id}, 时间范围={last_minutes}分钟")
         try:
             platform_name = event.get_platform_name()
             logger.info(f"尝试撤回用户 {user_id} 最近 {last_minutes} 分钟的消息，平台: {platform_name}")
@@ -411,10 +419,12 @@ class SpamDetectorPlugin(Star):
                         for msg in recent_messages:
                             try:
                                 logger.debug(f"正在撤回消息ID: {msg['message_id']}")
+                                # message_id 可能为非纯数字字符串，直接使用原始值
                                 payloads = {
-                                    "message_id": int(msg["message_id"]),
+                                    "message_id": msg["message_id"],
                                 }
                                 ret = await client.api.call_action('delete_msg', **payloads)
+                                logger.debug(f"撤回消息 {payloads['message_id']} 返回: {ret}")
                                 recall_count += 1
                                 logger.debug(f"成功撤回消息 {msg['message_id']}: {msg['content'][:30]}...")
                                 # 避免频繁调用API
@@ -453,6 +463,7 @@ class SpamDetectorPlugin(Star):
                         }
                         logger.debug(f"调用 set_group_ban API，payloads: {payloads}")
                         ret = await client.api.call_action('set_group_ban', **payloads)
+                        logger.debug(f"禁言用户 {user_id} 返回: {ret}")
                         
                         # 计算禁言时长的可读格式
                         if duration >= 3600:
@@ -494,10 +505,15 @@ class SpamDetectorPlugin(Star):
                 return
             logger.debug(f"用户 {user_id} 不在白名单中")
             
-            # 存储用户消息
-            message_id = getattr(event.message_obj, 'message_id', '')
-            self._store_user_message(user_id, message_content, timestamp, message_id)
-            logger.debug(f"已存储用户 {user_id} 的消息，消息ID: {message_id}")
+            # 存储用户消息，使用 raw_message 中的数字 message_id
+            raw_msg = getattr(event.message_obj, 'raw_message', {})
+            msg_id = None
+            if isinstance(raw_msg, dict) and 'message_id' in raw_msg:
+                msg_id = raw_msg['message_id']
+            else:
+                msg_id = getattr(event.message_obj, 'message_id', '')
+            self._store_user_message(user_id, message_content, timestamp, msg_id)
+            logger.debug(f"已存储用户 {user_id} 的消息，消息ID: {msg_id}")
             
             # 提取图片内容
             image_urls = []
