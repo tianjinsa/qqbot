@@ -361,8 +361,8 @@ class SpamDetectorPlugin(Star):
                 forward_content += f"{i}. {msg}\n"
             
             # 构建统一消息来源标识符，使用正确的消息类型 group
-            # 构建统一消息来源标识符，message_type 应为 'group_message'
-            admin_unified_origin = f"{event.get_platform_name()}:group_message:{admin_chat_id}"
+            # 构建统一消息来源标识符，message_type 应为 'GROUP_MESSAGE'
+            admin_unified_origin = f"{event.get_platform_name()}:GROUP_MESSAGE:{admin_chat_id}"
             
             # 使用正确的MessageChain导入和发送方式
             from astrbot.api.event import MessageChain
@@ -418,6 +418,7 @@ class SpamDetectorPlugin(Star):
                         logger.info(f"找到用户 {user_id} 需要撤回的消息: {len(recent_messages)} 条")
                         
                         recall_count = 0
+                        failed_count = 0
                         for msg in recent_messages:
                             try:
                                 logger.debug(f"正在撤回消息ID: {msg['message_id']}")
@@ -430,14 +431,23 @@ class SpamDetectorPlugin(Star):
                                 recall_count += 1
                                 logger.debug(f"成功撤回消息 {msg['message_id']}: {msg['content'][:30]}...")
                                 # 避免频繁调用API
-                                await asyncio.sleep(0.2)
+                                await asyncio.sleep(0.1)
                             except Exception as e:
-                                logger.warning(f"撤回消息 {msg['message_id']} 失败: {e}")
+                                failed_count += 1
+                                # 检查具体的错误类型，记录但不重试
+                                if "1200" in str(e) or "Recall failed" in str(e):
+                                    logger.debug(f"撤回消息 {msg['message_id']} 失败(可能超时或无权限): {msg['content'][:30]}...")
+                                elif "Timeout" in str(e):
+                                    logger.debug(f"撤回消息 {msg['message_id']} 超时: {msg['content'][:30]}...")
+                                else:
+                                    logger.debug(f"撤回消息 {msg['message_id']} 失败: {e}")
+                                # 失败后不重试，继续处理下一条消息
+                                continue
                         
                         if recall_count > 0:
-                            logger.info(f"✅ 已撤回用户 {user_id} 最近 {recall_count} 条消息")
+                            logger.info(f"✅ 已撤回用户 {user_id} 最近 {recall_count} 条消息 (失败 {failed_count} 条)")
                         else:
-                            logger.warning(f"未能撤回用户 {user_id} 的任何消息")
+                            logger.info(f"⚠️ 未能撤回用户 {user_id} 的任何消息 (共 {failed_count} 条失败，可能是权限或时间限制)")
                     else:
                         logger.warning(f"无法撤回消息: 群聊ID或用户历史消息不存在")
             else:
