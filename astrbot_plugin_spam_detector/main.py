@@ -367,6 +367,11 @@ class SpamDetectorPlugin(Star):
             
             logger.debug(f"调用视觉模型: model_id={model_id}, base_url={base_url}, timeout={timeout}, temperature={temperature}, thinking_enabled={thinking_enabled}")
             
+            # 调试信息：打印即将发送的消息
+            logger.debug(f"发送给视觉模型的消息数量: {len(messages)}")
+            for i, msg in enumerate(messages):
+                logger.debug(f"消息 {i+1}: role={msg.get('role')}, content类型={type(msg.get('content'))}")
+            
             # 创建OpenAI客户端
             client = AsyncOpenAI(
                 api_key=api_key,
@@ -374,23 +379,49 @@ class SpamDetectorPlugin(Star):
                 timeout=timeout
             )
             
-            # 添加系统提示词到消息开头
-            enhanced_messages = [{"role": "system", "content": system_prompt}] + messages
+            # 确保有系统消息
+            final_messages = []
+            has_system = any(msg.get('role') == 'system' for msg in messages)
+            if not has_system:
+                final_messages.append({"role": "system", "content": system_prompt})
+            final_messages.extend(messages)
             
-            # 构建API调用参数
+            # 构建基础API调用参数
             api_params = {
                 "model": model_id,
-                "messages": enhanced_messages,
+                "messages": final_messages,
                 "temperature": temperature,
                 "max_tokens": 1000
             }
             
-            # 如果启用思考模式，添加thinking参数
+            # 调用视觉模型，如果启用thinking模式则添加thinking参数
             if thinking_enabled:
+                # 对于智谱AI等支持thinking的模型，直接添加thinking参数
                 api_params["thinking"] = {"type": "enabled"}
+                logger.debug("已启用thinking模式，API参数包含thinking字段")
+            
+            logger.debug(f"最终API参数: {', '.join(api_params.keys())}")
             
             # 调用视觉模型
-            response = await client.chat.completions.create(**api_params)
+            try:
+                response = await client.chat.completions.create(**api_params)
+            except TypeError as e:
+                if "thinking" in str(e) and thinking_enabled:
+                    # 如果thinking参数不被支持，移除它并重试
+                    logger.warning("当前OpenAI SDK版本不支持thinking参数，尝试使用extra_body方式")
+                    api_params_without_thinking = {k: v for k, v in api_params.items() if k != "thinking"}
+                    # 尝试使用extra_body传递thinking参数（适用于某些SDK版本）
+                    try:
+                        response = await client.chat.completions.create(
+                            **api_params_without_thinking,
+                            extra_body={"thinking": {"type": "enabled"}}
+                        )
+                        logger.debug("成功使用extra_body方式启用thinking模式")
+                    except Exception as extra_e:
+                        logger.warning(f"extra_body方式也失败，回退到普通模式: {extra_e}")
+                        response = await client.chat.completions.create(**api_params_without_thinking)
+                else:
+                    raise e
             
             if response.choices and len(response.choices) > 0:
                 logger.debug(f"视觉模型调用成功，返回内容: {response.choices[0].message.content[:100]}...")
@@ -520,14 +551,18 @@ class SpamDetectorPlugin(Star):
                 logger.warning("视觉模型API Key未配置，无法处理图片内容")
                 return ""
             
-            # 处理图片URL，支持本地文件路径转base64
+            # 处理图片URL，支持HTTP链接和本地文件路径转base64
             processed_images = []
-            for url in image_urls[:3]:  # 最多处理3张图片
+            for i, url in enumerate(image_urls[:4]):  # 最多处理4张图片
+                logger.debug(f"处理图片 {i+1}/{len(image_urls[:4])}: {url}")
+                
                 if url.startswith(('http://', 'https://')):
+                    # HTTP/HTTPS链接，直接使用URL
                     processed_images.append({
                         "type": "image_url",
                         "image_url": {"url": url}
                     })
+                    logger.debug(f"图片 {i+1}: 使用HTTP链接格式")
                 else:
                     # 本地文件路径，转换为base64
                     try:
@@ -542,13 +577,16 @@ class SpamDetectorPlugin(Star):
                                     "type": "image_url",
                                     "image_url": {"url": f"data:{mime_type};base64,{image_data}"}
                                 })
+                                logger.debug(f"图片 {i+1}: 成功转换为base64格式 ({mime_type})")
+                        else:
+                            logger.warning(f"本地文件不存在: {url}")
                     except Exception as e:
                         logger.warning(f"处理本地图片失败: {e}")
             
             if not processed_images:
                 return ""
             
-            # 构建消息
+            # 构建符合GLM-4.1v格式的消息
             messages = [
                 {
                     "role": "system",
@@ -564,7 +602,19 @@ class SpamDetectorPlugin(Star):
                     ] + processed_images
                 }
             ]
-            logger.info(f"发送给视觉模型消息messages: {messages}")
+            
+            logger.debug(f"发送给视觉模型的消息格式:")
+            logger.debug(f"- 系统消息: {messages[0]['content']}")
+            logger.debug(f"- 用户消息包含 {len(processed_images)} 张图片")
+            for i, img in enumerate(processed_images):
+                img_url = img["image_url"]["url"]
+                if img_url.startswith("data:"):
+                    logger.debug(f"  图片{i+1}: base64格式 (长度: {len(img_url)} 字符)")
+                elif img_url.startswith(('http://', 'https://')):
+                    logger.debug(f"  图片{i+1}: HTTP链接格式 ({img_url})")
+                else:
+                    logger.debug(f"  图片{i+1}: 其他格式 ({img_url[:50]}...)")
+            
             # 调用视觉模型
             result = await self._call_vision_model(messages)
             return result or ""
