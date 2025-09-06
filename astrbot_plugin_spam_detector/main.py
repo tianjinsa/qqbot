@@ -584,7 +584,7 @@ class SpamDetectorPlugin(Star):
             # 添加标题节点
             title_content = f"🚨 推销检测报告\n👤 用户: {user_name} ({user_id})\n🏷️ 原群聊: {group_name} ({group_id})\n⏰ 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             nodes.append(Comp.Node(
-                uin=int(client.self_id),
+                uin=str(client.self_id),
                 name="AstrBot反推销系统",
                 content=[Comp.Plain(title_content)]
             ))
@@ -595,7 +595,7 @@ class SpamDetectorPlugin(Star):
                     timestamp_str = datetime.fromtimestamp(msg_record.get("timestamp", time.time())).strftime('%H:%M:%S')
                     content_text = f"[{timestamp_str}] {msg_record['content']}"
                     nodes.append(Comp.Node(
-                        uin=int(user_id),
+                        uin=str(user_id),
                         name=f"{user_name}",
                         content=[Comp.Plain(content_text)]
                     ))
@@ -621,7 +621,7 @@ class SpamDetectorPlugin(Star):
             
             ret = await client.api.call_action(
                 'send_group_forward_msg',
-                group_id=int(admin_chat_id),
+                group_id=str(admin_chat_id),
                 messages=forward_msg
             )
             logger.info(f"合并转发结果: {ret}")
@@ -846,8 +846,8 @@ class SpamDetectorPlugin(Star):
                     
                     if group_id:
                         payloads = {
-                            "group_id": int(group_id),
-                            "user_id": int(user_id),
+                            "group_id": str(group_id),
+                            "user_id": str(user_id),
                             "duration": duration  # 禁言时长（秒）
                         }
                         logger.debug(f"调用 set_group_ban API，payloads: {payloads}")
@@ -873,48 +873,27 @@ class SpamDetectorPlugin(Star):
     async def _get_group_name(self, group_id: str) -> str:
         """获取群聊名称"""
         try:
-            # 这里可以根据不同平台获取群聊名称
-            # 目前返回默认格式，后续可以扩展
-            return f"群聊{group_id}"
+            # 尝试从事件信息中获取群聊名称
+            platform_meta = self.context.cached_platform_meta
+            if platform_meta and hasattr(platform_meta, 'aiocqhttp'):
+                adapter = platform_meta.aiocqhttp
+                if adapter:
+                    try:
+                        # 调用 get_group_info API 获取群信息
+                        group_info = await adapter.call_api("get_group_info", group_id=str(group_id))
+                        if group_info and 'group_name' in group_info:
+                            group_name = group_info['group_name']
+                            logger.debug(f"获取到群聊名称: {group_name} (群聊ID: {group_id})")
+                            return group_name
+                    except Exception as e:
+                        logger.debug(f"获取群聊名称失败: {e}")
+            
+            # 如果无法获取群聊名称，返回默认值
+            return "未知群聊"
+            
         except Exception as e:
             logger.warning(f"获取群聊名称时出错: {e}")
             return "未知群聊"
-        """尝试禁言用户（如果平台支持）"""
-        try:
-            platform_name = event.get_platform_name()
-            logger.info(f"尝试禁言用户 {user_id}，时长: {duration}秒，平台: {platform_name}")
-            
-            if platform_name == "aiocqhttp":
-                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
-                if isinstance(event, AiocqhttpMessageEvent):
-                    client = event.bot
-                    group_id = event.get_group_id()
-                    
-                    if group_id:
-                        payloads = {
-                            "group_id": int(group_id),
-                            "user_id": int(user_id),
-                            "duration": duration  # 禁言时长（秒）
-                        }
-                        logger.debug(f"调用 set_group_ban API，payloads: {payloads}")
-                        ret = await client.api.call_action('set_group_ban', **payloads)
-                        logger.debug(f"禁言用户 {user_id} 返回: {ret}")
-                        
-                        # 计算禁言时长的可读格式
-                        if duration >= 3600:
-                            duration_str = f"{duration // 3600}小时{(duration % 3600) // 60}分钟"
-                        elif duration >= 60:
-                            duration_str = f"{duration // 60}分钟"
-                        else:
-                            duration_str = f"{duration}秒"
-                        
-                        logger.info(f"✅ 已禁言用户 {user_id}，时长: {duration_str}")
-                    else:
-                        logger.warning(f"无法禁言用户 {user_id}: 群聊ID不存在")
-            else:
-                logger.warning(f"平台 {platform_name} 不支持禁言功能")
-        except Exception as e:
-            logger.warning(f"禁言用户失败: {e}", exc_info=True)
     
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def on_group_message(self, event: AstrMessageEvent):
@@ -1102,28 +1081,3 @@ class SpamDetectorPlugin(Star):
         self.group_message_pools.clear()
         
         logger.info("防推销插件已停止")
-    
-    async def _get_group_name(self, group_id: str) -> str:
-        """获取群聊名称"""
-        try:
-            # 尝试从事件信息中获取群聊名称
-            platform_meta = self.context.cached_platform_meta
-            if platform_meta and hasattr(platform_meta, 'aiocqhttp'):
-                adapter = platform_meta.aiocqhttp
-                if adapter:
-                    try:
-                        # 调用 get_group_info API 获取群信息
-                        group_info = await adapter.call_api("get_group_info", group_id=int(group_id))
-                        if group_info and 'group_name' in group_info:
-                            group_name = group_info['group_name']
-                            logger.debug(f"获取到群聊名称: {group_name} (群聊ID: {group_id})")
-                            return group_name
-                    except Exception as e:
-                        logger.debug(f"获取群聊名称失败: {e}")
-            
-            # 如果无法获取群聊名称，返回默认值
-            return "未知群聊"
-            
-        except Exception as e:
-            logger.warning(f"获取群聊名称时出错: {e}")
-            return "未知群聊"
