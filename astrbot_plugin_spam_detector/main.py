@@ -186,7 +186,7 @@ class SpamDetectorPlugin(Star):
                 user_id, user_name, message_content, timestamp, event, image_content = self._extract_task_info(task)
                 await self._handle_spam_detection_result(user_id, user_name, group_id, event, batch_type)
         
-        logger.info(f"{batch_type}处理完成，发现 {len(spam_user_ids)} 个推销用户")
+        logger.info(f"{batch_type}处理完成，发现 {len(spam_user_ids)} 个推销用户，分别是: {', '.join(spam_user_ids)}")
     
     async def _process_single_task(self, task: tuple, group_id: str, reason: str):
         """处理单个任务"""
