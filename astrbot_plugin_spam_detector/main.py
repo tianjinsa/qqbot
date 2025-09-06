@@ -349,16 +349,24 @@ class SpamDetectorPlugin(Star):
                 return
             group_id = event.get_group_id()
             
-            # 直接复制原消息文本并发送给管理员群
-            header = f"🚨 [推销报告] 群:{group_id or '私聊'} 用户:{user_name}({user_id})"
-            text = f"{header}\n{event.message_str}"
+            # 构建转发内容
+            forward_content = f"🚨 推销检测报告\n"
+            forward_content += f"用户: {user_name} ({user_id})\n"
+            forward_content += f"平台: {event.get_platform_name()}\n"
+            forward_content += f"原群聊ID: {group_id or '私聊'}\n"
+            forward_content += f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            forward_content += f"最近 {len(recent_messages)} 条消息:\n"
+            
+            for i, msg in enumerate(recent_messages, 1):
+                forward_content += f"{i}. {msg}\n"
+            
+            # 构建统一消息来源标识符，使用正确的消息类型 group
+            # 构建统一消息来源标识符，message_type 应为 'group_message'
+            admin_unified_origin = f"{event.get_platform_name()}:group_message:{admin_chat_id}"
+            
+            # 使用正确的MessageChain导入和发送方式
             from astrbot.api.event import MessageChain
-            message_chain = MessageChain().message(text)
-            # 添加历史消息摘要
-            if recent_messages:
-                history = "\n历史消息:" + "; ".join(recent_messages)
-                message_chain = message_chain.message(history)
-            admin_unified_origin = f"{event.get_platform_name()}:group:{admin_chat_id}"
+            message_chain = MessageChain().message(forward_content)
             
             logger.info(f"准备向管理员群发送推销报告，目标origin: {admin_unified_origin}")
             try:
