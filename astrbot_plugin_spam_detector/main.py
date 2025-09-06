@@ -316,9 +316,14 @@ class SpamDetectorPlugin(Star):
             else:
                 logger.warning("步骤2: 管理员群聊ID未配置，无法转发推销消息")
             
-            # 3. 撤回当前消息（如果平台支持）
-            logger.info("步骤3: 尝试撤回触发消息")
+            # 3. 撤回当前消息并发送警告消息（如果平台支持）
+            logger.info("步骤3: 尝试撤回触发消息并发送警告")
             await self._try_recall_message(event)
+            
+            # 发送警告消息（只在撤回当前消息时发送）
+            alert_message = self._get_config_value("SPAM_ALERT_MESSAGE",
+                "⚠️ 检测到疑似推销信息，该消息已被处理，用户已被禁言。")
+            logger.info(f"发送警告消息: {alert_message}")
             
             # 4. 撤回用户最近的所有消息（如果平台支持）
             logger.info("步骤4: 尝试撤回历史消息")
@@ -329,10 +334,7 @@ class SpamDetectorPlugin(Star):
             logger.info(f"步骤5: 尝试禁言用户 {mute_duration} 秒")
             await self._try_mute_user(event, user_id, mute_duration)
             
-            # 6. 发送警告消息
-            alert_message = self._get_config_value("SPAM_ALERT_MESSAGE",
-                "⚠️ 检测到疑似推销信息，该消息已被处理，用户已被禁言。")
-            logger.info(f"步骤6: 发送警告消息: {alert_message}")
+            # 返回警告消息结果
             return event.plain_result(alert_message)
             
         except Exception as e:
@@ -360,20 +362,29 @@ class SpamDetectorPlugin(Star):
             for i, msg in enumerate(recent_messages, 1):
                 forward_content += f"{i}. {msg}\n"
             
-            # 构建统一消息来源标识符，使用正确的消息类型 group
-            # 构建统一消息来源标识符，message_type 应为 'GROUP_MESSAGE'
-            admin_unified_origin = f"{event.get_platform_name()}:GROUP_MESSAGE:{admin_chat_id}"
-            
-            # 使用正确的MessageChain导入和发送方式
-            from astrbot.api.event import MessageChain
-            message_chain = MessageChain().message(forward_content)
-            
-            logger.info(f"准备向管理员群发送推销报告，目标origin: {admin_unified_origin}")
-            try:
-                ret = await self.context.send_message(admin_unified_origin, message_chain)
-                logger.info(f"推销报告转发结果: {ret}")
-            except Exception as send_exc:
-                logger.error(f"转发推销报告到 {admin_unified_origin} 失败: {send_exc}", exc_info=True)
+            platform_name = event.get_platform_name()
+            if platform_name == "aiocqhttp":
+                try:
+                    from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
+                    if isinstance(event, AiocqhttpMessageEvent):
+                        client = event.bot
+                        logger.info(f"使用 aiocqhttp send_group_msg 直接转发到管理员群 {admin_chat_id}")
+                        ret = await client.api.call_action(
+                            'send_group_msg',
+                            group_id=str(admin_chat_id),
+                            message=forward_content
+                        )
+                        logger.info(f"aiocqhttp 转发结果: {ret}")
+                        return
+                    else:
+                        logger.warning("事件类型不是 AiocqhttpMessageEvent，无法直接调用 send_group_msg")
+                        return
+                except Exception as platform_exc:
+                    logger.error(f"aiocqhttp 平台转发失败: {platform_exc}", exc_info=True)
+                    return
+            else:
+                logger.warning(f"平台 {platform_name} 暂未实现管理员转发逻辑，已跳过")
+                return
             
         except Exception as e:
             logger.error(f"转发到管理员群失败: {e}", exc_info=True)
