@@ -6,6 +6,7 @@
 将整个 `astrbot_plugin_spam_detector` 文件夹复制到 AstrBot 的 `data/plugins/` 目录下。
 
 ### 2. 重载插件
+
 在 AstrBot WebUI 的插件管理页面中找到 "astrbot_plugin_spam_detector"，点击 "重载插件"。
 
 ### 3. 配置插件

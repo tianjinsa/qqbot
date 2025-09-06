@@ -19,7 +19,11 @@ class SpamDetectorPlugin(Star):
         super().__init__(context)
         self.config = config
         # 用户消息历史缓存 (用户ID -> 消息列表)
-        self.user_message_history: Dict[str, List[Dict[str, Any]]] = {}
+    self.user_message_history = {}  # type: Dict[str, List[Dict[str, Any]]]
+    # 已处理过的消息ID -> 时间戳，用于防止重复处理
+    self.processed_messages = {}  # type: Dict[str, float]
+    # 用户最近一次被判定为推销并处理的时间（可用于频繁触发保护）
+    self.user_last_spam_handle = {}  # type: Dict[str, float]
         
     async def initialize(self):
         """插件初始化"""
@@ -145,15 +149,40 @@ class SpamDetectorPlugin(Star):
         self.user_message_history[user_id].append({
             "content": message_content,
             "timestamp": timestamp,
-            "message_id": message_id
+            "message_id": message_id,
+            "recalled": False
         })
-        
-        # 清理过期消息（超过1小时的消息）
-        cutoff_time = timestamp - 3600  # 1小时前
-        self.user_message_history[user_id] = [
-            msg for msg in self.user_message_history[user_id] 
-            if msg["timestamp"] > cutoff_time
-        ]
+        # 配置控制：保留时长与 LAST_TIME 同步（分钟 -> 秒）
+        retention_minutes = int(self._get_config_value("LAST_TIME", 5))
+        retention_seconds = retention_minutes * 60
+        max_per_user = int(self._get_config_value("MAX_MESSAGES_PER_USER", 200))
+        cutoff_time = timestamp - retention_seconds
+        # 过滤保留时间外的消息
+        self.user_message_history[user_id] = [m for m in self.user_message_history[user_id] if m["timestamp"] > cutoff_time]
+        # 每用户上限裁剪
+        if len(self.user_message_history[user_id]) > max_per_user:
+            self.user_message_history[user_id] = self.user_message_history[user_id][-max_per_user:]
+        # 清理 processed_messages 过期记录
+        expired_ids = [mid for mid, ts in self.processed_messages.items() if ts < cutoff_time]
+        for mid in expired_ids:
+            self.processed_messages.pop(mid, None)
+        # 限制 processed_messages 大小
+        if len(self.processed_messages) > 5000:
+            for mid, _ in sorted(self.processed_messages.items(), key=lambda x: x[1])[:1000]:
+                self.processed_messages.pop(mid, None)
+
+    def _get_forward_messages(self, user_id: str, last_minutes: int) -> List[str]:
+        """获取需要在转发报告中展示的最近消息（过滤已撤回与空内容）"""
+        if user_id not in self.user_message_history:
+            return []
+        cutoff_time = time.time() - (last_minutes * 60)
+        result: List[str] = []
+        for msg in self.user_message_history[user_id]:
+            if msg["timestamp"] >= cutoff_time and not msg.get("recalled"):
+                content = (msg.get("content") or "").strip()
+                if content:
+                    result.append(content)
+        return result
     
     def _get_user_recent_messages(self, user_id: str, last_minutes: int) -> List[str]:
         """获取用户在指定时间内的所有消息"""
@@ -166,6 +195,41 @@ class SpamDetectorPlugin(Star):
             if msg["timestamp"] > cutoff_time
         ]
         return recent_messages
+
+    def _periodic_cleanup(self):
+        """周期性全局清理，避免内存增长"""
+        now = time.time()
+        if now - getattr(self, 'last_cleanup_time', 0) < 60:
+            return
+        self.last_cleanup_time = now
+        retention_minutes = int(self._get_config_value("LAST_TIME", 5))
+        retention_seconds = retention_minutes * 60
+        cutoff_time = now - retention_seconds
+        # 清理用户消息
+        stale_users = []
+        for uid, msgs in self.user_message_history.items():
+            new_list = [m for m in msgs if m["timestamp"] > cutoff_time]
+            if new_list:
+                self.user_message_history[uid] = new_list
+            else:
+                stale_users.append(uid)
+        for uid in stale_users:
+            self.user_message_history.pop(uid, None)
+        # 限制全局用户数
+        global_limit = int(self._get_config_value("GLOBAL_MAX_CACHED_USERS", 1000))
+        if len(self.user_message_history) > global_limit:
+            sorted_users = sorted(
+                ((uid, max(m["timestamp"] for m in msgs)) for uid, msgs in self.user_message_history.items() if msgs),
+                key=lambda x: x[1]
+            )
+            overflow = len(self.user_message_history) - global_limit
+            for uid, _ in sorted_users[:overflow]:
+                self.user_message_history.pop(uid, None)
+        # 清理 user_last_spam_handle 过期项（>1天）
+        spam_cutoff = now - 86400
+        for u in [u for u, ts in self.user_last_spam_handle.items() if ts < spam_cutoff]:
+            self.user_last_spam_handle.pop(u, None)
+        logger.debug(f"定期清理: users={len(self.user_message_history)} processed={len(self.processed_messages)}")
     
     async def _get_context_messages(self, event: AstrMessageEvent, count: int) -> List[str]:
         """获取上下文消息（这里简化实现，实际可能需要调用平台API获取历史消息）"""
@@ -305,14 +369,14 @@ class SpamDetectorPlugin(Star):
             
             # 1. 获取用户最近的消息
             last_time = self._get_config_value("LAST_TIME", 5)
-            recent_messages = self._get_user_recent_messages(user_id, last_time)
-            logger.info(f"获取到用户 {user_id} 最近 {last_time} 分钟内的 {len(recent_messages)} 条消息")
+            forward_messages = self._get_forward_messages(user_id, last_time)
+            logger.info(f"获取到用于转发展示的消息 {len(forward_messages)} 条 (已过滤撤回/空内容)")
             
             # 2. 转发到管理员群（若配置）
             admin_chat_id = self._get_config_value("ADMIN_CHAT_ID", "")
             if admin_chat_id:
                 logger.info(f"步骤2: 转发推销消息到管理员群: {admin_chat_id}")
-                await self._forward_to_admin(admin_chat_id, user_name, user_id, recent_messages, event)
+                await self._forward_to_admin(admin_chat_id, user_name, user_id, forward_messages, event)
             else:
                 logger.warning("步骤2: 管理员群聊ID未配置，无法转发推销消息")
             
@@ -402,6 +466,14 @@ class SpamDetectorPlugin(Star):
                     }
                     ret = await client.api.call_action('delete_msg', **payloads)
                     logger.info(f"撤回单条消息，id={payloads['message_id']} 返回: {ret}")
+                    # 标记已撤回
+                    sender_id = event.get_sender_id()
+                    msg_id = event.message_obj.message_id
+                    if sender_id in self.user_message_history:
+                        for msg in self.user_message_history[sender_id]:
+                            if msg.get("message_id") == msg_id:
+                                msg["recalled"] = True
+                                break
         except Exception as e:
             logger.warning(f"撤回消息失败: {e}")
     
@@ -441,6 +513,7 @@ class SpamDetectorPlugin(Star):
                                 logger.debug(f"撤回消息 {payloads['message_id']} 返回: {ret}")
                                 recall_count += 1
                                 logger.debug(f"成功撤回消息 {msg['message_id']}: {msg['content'][:30]}...")
+                                msg["recalled"] = True
                                 # 避免频繁调用API
                                 await asyncio.sleep(0.1)
                             except Exception as e:
@@ -535,6 +608,11 @@ class SpamDetectorPlugin(Star):
                 msg_id = raw_msg['message_id']
             else:
                 msg_id = getattr(event.message_obj, 'message_id', '')
+
+            # 去重：如果该消息ID已经处理过，直接跳过
+            if msg_id and msg_id in self.processed_messages:
+                logger.debug(f"消息 {msg_id} 已处理过，跳过")
+                return
             self._store_user_message(user_id, message_content, timestamp, msg_id)
             logger.debug(f"已存储用户 {user_id} 的消息，消息ID: {msg_id}")
             
@@ -567,6 +645,10 @@ class SpamDetectorPlugin(Star):
             
             if is_spam:
                 logger.info(f"🚨 检测到推销消息，用户: {user_name} ({user_id}), 内容: {message_content}")
+                # 记录已处理消息ID
+                if msg_id:
+                    self.processed_messages[msg_id] = time.time()
+                self.user_last_spam_handle[user_id] = time.time()
                 result = await self._handle_spam_message(event, user_id, user_name)
                 if result:
                     yield result
