@@ -517,6 +517,153 @@ class SpamDetectorPlugin(Star):
                 logger.debug(f"已从消息池中删除撤回的消息: {message_id}")
                 break
     
+    def _clear_user_detection_queue(self, group_id: str, user_id: str):
+        """从检测队列中清理指定群聊指定用户的待处理任务"""
+        try:
+            # 创建临时队列存储不需要清理的任务
+            temp_queue = asyncio.Queue()
+            cleared_count = 0
+            
+            # 从原队列中取出所有任务
+            while not self.detection_queue.empty():
+                try:
+                    task = self.detection_queue.get_nowait()
+                    task_group_id, task_user_id = task[0], task[1]
+                    
+                    # 如果不是要清理的用户任务，放入临时队列
+                    if task_group_id != group_id or task_user_id != user_id:
+                        temp_queue.put_nowait(task)
+                    else:
+                        cleared_count += 1
+                        logger.debug(f"从队列中清除任务: 群聊{task_group_id}, 用户{task_user_id}")
+                        
+                except asyncio.QueueEmpty:
+                    break
+            
+            # 将临时队列中的任务放回原队列
+            while not temp_queue.empty():
+                try:
+                    task = temp_queue.get_nowait()
+                    self.detection_queue.put_nowait(task)
+                except asyncio.QueueEmpty:
+                    break
+            
+            if cleared_count > 0:
+                logger.info(f"已从检测队列中清除 {cleared_count} 个重复任务 (群聊: {group_id}, 用户: {user_id})")
+                
+        except Exception as e:
+            logger.error(f"清理检测队列时出错: {e}", exc_info=True)
+    
+    async def _forward_messages_as_merged(self, admin_chat_id: str, group_id: str, user_id: str, 
+                                        user_name: str, user_messages: List[Dict], event: AstrMessageEvent):
+        """使用合并转发的方式将消息转发到管理员群"""
+        try:
+            if not admin_chat_id:
+                logger.warning("管理员群聊ID未配置，无法转发消息")
+                return
+                
+            platform_name = event.get_platform_name()
+            if platform_name != "aiocqhttp":
+                logger.warning(f"平台 {platform_name} 不支持合并转发，使用文本转发")
+                await self._forward_to_admin_text(admin_chat_id, group_id, user_id, user_name, user_messages, event)
+                return
+            
+            from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
+            if not isinstance(event, AiocqhttpMessageEvent):
+                logger.warning("事件类型不是 AiocqhttpMessageEvent，无法使用合并转发")
+                await self._forward_to_admin_text(admin_chat_id, group_id, user_id, user_name, user_messages, event)
+                return
+            
+            client = event.bot
+            group_name = await self._get_group_name(group_id)
+            
+            # 构建合并转发的节点列表
+            import astrbot.api.message_components as Comp
+            nodes = []
+            
+            # 添加标题节点
+            title_content = f"🚨 推销检测报告\n👤 用户: {user_name} ({user_id})\n🏷️ 原群聊: {group_name} ({group_id})\n⏰ 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            nodes.append(Comp.Node(
+                uin=int(client.self_id),
+                name="AstrBot反推销系统",
+                content=[Comp.Plain(title_content)]
+            ))
+            
+            # 添加每条被撤回的消息作为节点
+            for i, msg_record in enumerate(user_messages):
+                if msg_record.get("content", "").strip():
+                    timestamp_str = datetime.fromtimestamp(msg_record.get("timestamp", time.time())).strftime('%H:%M:%S')
+                    content_text = f"[{timestamp_str}] {msg_record['content']}"
+                    nodes.append(Comp.Node(
+                        uin=int(user_id),
+                        name=f"{user_name}",
+                        content=[Comp.Plain(content_text)]
+                    ))
+            
+            if len(nodes) <= 1:
+                logger.warning("没有有效的消息内容，跳过合并转发")
+                return
+            
+            # 发送合并转发
+            logger.info(f"发送合并转发到管理员群 {admin_chat_id}，包含 {len(nodes)} 个节点")
+            
+            # 使用原生 CQHTTP API 发送合并转发
+            forward_msg = []
+            for node in nodes:
+                forward_msg.append({
+                    "type": "node",
+                    "data": {
+                        "uin": str(node.uin),
+                        "name": node.name,
+                        "content": [{"type": "text", "data": {"text": comp.text}} for comp in node.content if hasattr(comp, 'text')]
+                    }
+                })
+            
+            ret = await client.api.call_action(
+                'send_group_forward_msg',
+                group_id=int(admin_chat_id),
+                messages=forward_msg
+            )
+            logger.info(f"合并转发结果: {ret}")
+            
+        except Exception as e:
+            logger.error(f"合并转发失败: {e}", exc_info=True)
+            # 回退到文本转发
+            await self._forward_to_admin_text(admin_chat_id, group_id, user_id, user_name, user_messages, event)
+    
+    async def _forward_to_admin_text(self, admin_chat_id: str, group_id: str, user_id: str,
+                                   user_name: str, user_messages: List[Dict], event: AstrMessageEvent):
+        """文本形式转发到管理员群（作为合并转发的备用方案）"""
+        try:
+            group_name = await self._get_group_name(group_id)
+            
+            # 构建转发内容
+            forward_content = f"🚨 推销检测报告\n"
+            forward_content += f"👤 用户: {user_name} ({user_id})\n"
+            forward_content += f"🏷️ 原群聊: {group_name} ({group_id})\n"
+            forward_content += f"⏰ 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            forward_content += f"📋 被撤回的消息 ({len(user_messages)} 条):\n"
+            
+            for i, msg_record in enumerate(user_messages, 1):
+                if msg_record.get("content", "").strip():
+                    timestamp_str = datetime.fromtimestamp(msg_record.get("timestamp", time.time())).strftime('%H:%M:%S')
+                    forward_content += f"{i}. [{timestamp_str}] {msg_record['content']}\n"
+            
+            platform_name = event.get_platform_name()
+            if platform_name == "aiocqhttp":
+                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
+                if isinstance(event, AiocqhttpMessageEvent):
+                    client = event.bot
+                    ret = await client.api.call_action(
+                        'send_group_msg',
+                        group_id=str(admin_chat_id),
+                        message=forward_content
+                    )
+                    logger.info(f"文本转发结果: {ret}")
+            
+        except Exception as e:
+            logger.error(f"文本转发失败: {e}", exc_info=True)
+    
     async def _extract_image_content(self, image_urls: List[str]) -> str:
         """使用自定义视觉模型提取图片内容"""
         if not image_urls:
@@ -606,15 +753,31 @@ class SpamDetectorPlugin(Star):
         try:
             logger.info(f"开始处理推销消息，用户: {user_name} ({user_id})，群聊: {group_id}")
             
+            # 0. 清理检测队列中同一群聊同一用户的重复任务
+            logger.info(f"步骤0: 清理检测队列中的重复任务")
+            self._clear_user_detection_queue(group_id, user_id)
+            
             # 1. 先禁言用户
             mute_duration = self._get_config_value("MUTE_DURATION", 600)  # 默认10分钟
             logger.info(f"步骤1: 禁言用户 {user_id}，时长: {mute_duration} 秒")
             await self._try_mute_user(event, user_id, mute_duration)
             
-            # 2. 从消息池中获取该用户的所有消息并撤回
+            # 2. 从消息池中获取该用户的所有消息
             user_messages = self._get_user_messages_in_group(group_id, user_id)
             logger.info(f"步骤2: 从消息池获取到用户 {user_id} 的 {len(user_messages)} 条消息")
             
+            # 3. 先进行合并转发到管理员群（在撤回之前）
+            admin_chat_id = self._get_config_value("ADMIN_CHAT_ID", "")
+            if admin_chat_id and user_messages:
+                logger.info(f"步骤3: 合并转发推销消息到管理员群: {admin_chat_id}")
+                await self._forward_messages_as_merged(admin_chat_id, group_id, user_id, user_name, user_messages, event)
+            elif not admin_chat_id:
+                logger.warning("步骤3: 管理员群聊ID未配置，跳过转发")
+            else:
+                logger.warning("步骤3: 没有消息可转发")
+            
+            # 4. 执行消息撤回
+            logger.info(f"步骤4: 开始撤回用户 {user_id} 的消息")
             recall_count = 0
             for message_record in user_messages:
                 message_id = message_record.get("message_id")
@@ -631,27 +794,17 @@ class SpamDetectorPlugin(Star):
                         logger.debug(f"撤回消息 {message_id} 失败: {e}")
                         continue
             
-            logger.info(f"步骤2完成: 已撤回 {recall_count} 条消息")
+            logger.info(f"步骤4完成: 已撤回 {recall_count} 条消息")
             
-            # 3. 清理过期消息
+            # 5. 清理过期消息
             current_time = time.time()
-            logger.info(f"步骤3: 清理群聊 {group_id} 的过期消息")
+            logger.info(f"步骤5: 清理群聊 {group_id} 的过期消息")
             self._cleanup_expired_messages(group_id, current_time)
             
-            # 4. 发送警告消息
+            # 6. 发送警告消息
             alert_message = self._get_config_value("SPAM_ALERT_MESSAGE",
                 "⚠️ 检测到疑似推销信息，相关消息已被处理，用户已被禁言。")
-            logger.info(f"步骤4: 发送警告消息")
-            
-            # 5. 转发到管理员群（如果配置）
-            admin_chat_id = self._get_config_value("ADMIN_CHAT_ID", "")
-            if admin_chat_id:
-                logger.info(f"步骤5: 转发推销消息到管理员群: {admin_chat_id}")
-                # 获取被撤回前的消息内容用于转发
-                forward_messages = [msg["content"] for msg in user_messages if msg["content"].strip()]
-                await self._forward_to_admin(admin_chat_id, user_name, user_id, forward_messages, event)
-            else:
-                logger.warning("步骤5: 管理员群聊ID未配置，无法转发推销消息")
+            logger.info(f"步骤6: 发送警告消息")
             
             # 返回警告消息结果
             return event.plain_result(alert_message)
@@ -679,55 +832,53 @@ class SpamDetectorPlugin(Star):
             logger.debug(f"撤回消息 {message_id} 失败: {e}")
             return False
     
-    async def _forward_to_admin(self, admin_chat_id: str, user_name: str, user_id: str,
-                                recent_messages: List[str], event: AstrMessageEvent):
-        """转发消息到管理员群"""
-        logger.info(f"执行 _forward_to_admin，admin_chat_id={admin_chat_id}, user_id={user_id}")
-        try:
-            if not admin_chat_id:
-                logger.warning("管理员群聊ID未配置，无法转发消息")
-                return
-            group_id = event.get_group_id()
-            
-            # 构建转发内容
-            forward_content = f"🚨 推销检测报告\n"
-            forward_content += f"用户: {user_name} ({user_id})\n"
-            forward_content += f"平台: {event.get_platform_name()}\n"
-            forward_content += f"原群聊ID: {group_id or '私聊'}\n"
-            forward_content += f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-            forward_content += f"最近 {len(recent_messages)} 条消息:\n"
-            
-            for i, msg in enumerate(recent_messages, 1):
-                forward_content += f"{i}. {msg}\n"
-            
-            platform_name = event.get_platform_name()
-            if platform_name == "aiocqhttp":
-                try:
-                    from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
-                    if isinstance(event, AiocqhttpMessageEvent):
-                        client = event.bot
-                        logger.info(f"使用 aiocqhttp send_group_msg 直接转发到管理员群 {admin_chat_id}")
-                        ret = await client.api.call_action(
-                            'send_group_msg',
-                            group_id=str(admin_chat_id),
-                            message=forward_content
-                        )
-                        logger.info(f"aiocqhttp 转发结果: {ret}")
-                        return
-                    else:
-                        logger.warning("事件类型不是 AiocqhttpMessageEvent，无法直接调用 send_group_msg")
-                        return
-                except Exception as platform_exc:
-                    logger.error(f"aiocqhttp 平台转发失败: {platform_exc}", exc_info=True)
-                    return
-            else:
-                logger.warning(f"平台 {platform_name} 暂未实现管理员转发逻辑，已跳过")
-                return
-            
-        except Exception as e:
-            logger.error(f"转发到管理员群失败: {e}", exc_info=True)
-    
     async def _try_mute_user(self, event: AstrMessageEvent, user_id: str, duration: int):
+        """尝试禁言用户（如果平台支持）"""
+        try:
+            platform_name = event.get_platform_name()
+            logger.info(f"尝试禁言用户 {user_id}，时长: {duration}秒，平台: {platform_name}")
+            
+            if platform_name == "aiocqhttp":
+                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
+                if isinstance(event, AiocqhttpMessageEvent):
+                    client = event.bot
+                    group_id = event.get_group_id()
+                    
+                    if group_id:
+                        payloads = {
+                            "group_id": int(group_id),
+                            "user_id": int(user_id),
+                            "duration": duration  # 禁言时长（秒）
+                        }
+                        logger.debug(f"调用 set_group_ban API，payloads: {payloads}")
+                        ret = await client.api.call_action('set_group_ban', **payloads)
+                        logger.debug(f"禁言用户 {user_id} 返回: {ret}")
+                        
+                        # 计算禁言时长的可读格式
+                        if duration >= 3600:
+                            duration_str = f"{duration // 3600}小时{(duration % 3600) // 60}分钟"
+                        elif duration >= 60:
+                            duration_str = f"{duration // 60}分钟"
+                        else:
+                            duration_str = f"{duration}秒"
+                        
+                        logger.info(f"✅ 已禁言用户 {user_id}，时长: {duration_str}")
+                    else:
+                        logger.warning(f"无法禁言用户 {user_id}: 群聊ID不存在")
+            else:
+                logger.warning(f"平台 {platform_name} 不支持禁言功能")
+        except Exception as e:
+            logger.warning(f"禁言用户失败: {e}", exc_info=True)
+    
+    async def _get_group_name(self, group_id: str) -> str:
+        """获取群聊名称"""
+        try:
+            # 这里可以根据不同平台获取群聊名称
+            # 目前返回默认格式，后续可以扩展
+            return f"群聊{group_id}"
+        except Exception as e:
+            logger.warning(f"获取群聊名称时出错: {e}")
+            return "未知群聊"
         """尝试禁言用户（如果平台支持）"""
         try:
             platform_name = event.get_platform_name()
@@ -951,3 +1102,28 @@ class SpamDetectorPlugin(Star):
         self.group_message_pools.clear()
         
         logger.info("防推销插件已停止")
+    
+    async def _get_group_name(self, group_id: str) -> str:
+        """获取群聊名称"""
+        try:
+            # 尝试从事件信息中获取群聊名称
+            platform_meta = self.context.cached_platform_meta
+            if platform_meta and hasattr(platform_meta, 'aiocqhttp'):
+                adapter = platform_meta.aiocqhttp
+                if adapter:
+                    try:
+                        # 调用 get_group_info API 获取群信息
+                        group_info = await adapter.call_api("get_group_info", group_id=int(group_id))
+                        if group_info and 'group_name' in group_info:
+                            group_name = group_info['group_name']
+                            logger.debug(f"获取到群聊名称: {group_name} (群聊ID: {group_id})")
+                            return group_name
+                    except Exception as e:
+                        logger.debug(f"获取群聊名称失败: {e}")
+            
+            # 如果无法获取群聊名称，返回默认值
+            return "未知群聊"
+            
+        except Exception as e:
+            logger.warning(f"获取群聊名称时出错: {e}")
+            return "未知群聊"

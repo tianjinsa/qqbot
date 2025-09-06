@@ -1,27 +1,9 @@
 {
-  "LAST_TIME": {
-    "description": "检测到推销后，回溯该用户消息的时间范围（分钟）",
-    "type": "int",
-    "default": 5,
-    "hint": "当检测到推销信息时，会收集该用户在这个时间范围内发送的所有消息一并转发给管理员"
-  },
   "ADMIN_CHAT_ID": {
     "description": "管理员群聊ID",
     "type": "string",
     "hint": "推销消息将被转发到这个群聊，请填入群聊的完整ID",
     "obvious_hint": true
-  },
-  "SPAM_ALERT_MESSAGE": {
-    "description": "在原群聊发送的提示信息内容",
-    "type": "text",
-    "default": "⚠️ 检测到疑似推销信息，该消息已被处理，用户已被禁言。",
-    "hint": "当检测到推销信息后，在原群聊发送的警告消息"
-  },
-  "MUTE_DURATION": {
-    "description": "禁言时长（秒）",
-    "type": "int",
-    "default": 600,
-    "hint": "检测到推销信息后禁言用户的时长，单位为秒。600秒=10分钟，3600秒=1小时"
   },
   "WHITELIST_USERS": {
     "description": "白名单用户列表",
@@ -35,13 +17,23 @@
     "default": [],
     "hint": "只有在此列表中的群聊ID才会进行推销检测。如果为空则检测所有群聊。可以逗号分隔输入多个群聊ID"
   },
-  "LLM_SYSTEM_PROMPT": {
-    "description": "大模型系统提示词",
+  "SPAM_ALERT_MESSAGE": {
+    "description": "在原群聊发送的提示信息内容",
     "type": "text",
-    "default": "你是一个专业的推销信息检测助手。你将收到一个JSON格式的批量消息，其中包含多个用户的消息内容。\n\n推销信息的特征包括但不限于：\n1. 销售产品或服务\n2. 包含价格、优惠、折扣等商业信息\n3. 引导添加微信、QQ等联系方式进行交易\n4. 推广某个商品、品牌或服务\n5. 含有明显的营销意图\n\n请分析所有消息，找出其中的推销信息，并返回一个JSON格式的结果，格式为：{\"y\":[用户ID1,用户ID2,...]}\n其中y数组包含所有被识别为推销信息的用户ID。如果没有推销信息，返回{\"y\":[]}",
-    "hint": "自定义大模型的系统提示词，用于引导模型进行批量推销检测。必须返回JSON格式的结果",
-    "editor_mode": true,
-    "editor_language": "text"
+    "default": "⚠️ 检测到疑似推销信息，该消息已被处理，用户已被禁言。",
+    "hint": "当检测到推销信息后，在原群聊发送的警告消息"
+  },
+  "MUTE_DURATION": {
+    "description": "禁言时长（秒）",
+    "type": "int",
+    "default": 600,
+    "hint": "检测到推销信息后禁言用户的时长，单位为秒。600秒=10分钟，3600秒=1小时"
+  },
+  "LAST_TIME": {
+    "description": "检测到推销后，回溯该用户消息的时间范围（分钟）",
+    "type": "int",
+    "default": 5,
+    "hint": "当检测到推销信息时，会收集该用户在这个时间范围内发送的所有消息一并转发给管理员"
   },
   "TEXT_MODEL_ID": {
     "description": "文本模型ID",
@@ -63,6 +55,26 @@
     "hint": "文本模型的API密钥，请确保密钥有效且有足够的额度",
     "obvious_hint": true
   },
+  "TEXT_MODEL_TEMPERATURE": {
+    "description": "文本模型温度",
+    "type": "float",
+    "default": 0.7,
+    "hint": "控制文本模型生成的随机性，范围0-2，值越低结果越确定"
+  },
+  "TEXT_MODEL_THINKING_ENABLED": {
+    "description": "启用文本模型思考模式",
+    "type": "bool",
+    "default": true,
+    "hint": "是否为文本模型启用思考模式，可能提高准确性但增加响应时间"
+  },
+  "LLM_SYSTEM_PROMPT": {
+    "description": "文本模型系统提示词",
+    "type": "text",
+    "default": "你是一个专业的推销信息检测助手。你将收到一个JSON格式的批量消息，其中包含多个用户的消息内容。\n\n推销信息的特征包括但不限于：\n1. 销售产品或服务\n2. 包含价格、优惠、折扣等商业信息\n3. 引导添加微信、QQ等联系方式进行交易\n4. 推广某个商品、品牌或服务\n5. 含有明显的营销意图\n\n请分析所有消息，找出其中的推销信息，并返回一个JSON格式的结果，格式为：{\"y\":[用户ID1,用户ID2,...]}\n其中y数组包含所有被识别为推销信息的用户ID。如果没有推销信息，返回{\"y\":[]}",
+    "hint": "自定义文本模型的系统提示词，用于引导模型进行批量推销检测。必须返回JSON格式的结果",
+    "editor_mode": true,
+    "editor_language": "text"
+  },
   "VISION_MODEL_ID": {
     "description": "视觉模型ID",
     "type": "string",
@@ -79,6 +91,26 @@
     "description": "视觉模型API Key",
     "type": "string", 
     "hint": "视觉模型的API密钥，可以与文本模型使用相同密钥"
+  },
+  "VISION_MODEL_TEMPERATURE": {
+    "description": "视觉模型温度",
+    "type": "float",
+    "default": 0.7,
+    "hint": "控制视觉模型生成的随机性，范围0-2，值越低结果越确定"
+  },
+  "VISION_MODEL_THINKING_ENABLED": {
+    "description": "启用视觉模型思考模式",
+    "type": "bool",
+    "default": true,
+    "hint": "是否为视觉模型启用思考模式，可能提高准确性但增加响应时间"
+  },
+  "VISION_MODEL_SYSTEM_PROMPT": {
+    "description": "视觉模型系统提示词",
+    "type": "text",
+    "default": "提取图片上的内容，特别是文字",
+    "hint": "自定义视觉模型的系统提示词，用于引导模型更好地识别图片内容",
+    "editor_mode": true,
+    "editor_language": "text"
   },
   "MODEL_TIMEOUT": {
     "description": "模型请求超时时间（秒）",
@@ -104,42 +136,10 @@
     "default": 2000,
     "hint": "批量处理时所有消息内容的最大总字符数，超出此限制的消息将单独处理"
   },
-  "TEXT_MODEL_TEMPERATURE": {
-    "description": "文本模型温度",
-    "type": "float",
-    "default": 0.7,
-    "hint": "控制文本模型生成的随机性，范围0-2，值越低结果越确定"
-  },
-  "TEXT_MODEL_THINKING_ENABLED": {
-    "description": "启用文本模型思考模式",
-    "type": "bool",
-    "default": true,
-    "hint": "是否为文本模型启用思考模式，可能提高准确性但增加响应时间"
-  },
-  "VISION_MODEL_TEMPERATURE": {
-    "description": "视觉模型温度",
-    "type": "float",
-    "default": 0.7,
-    "hint": "控制视觉模型生成的随机性，范围0-2，值越低结果越确定"
-  },
-  "VISION_MODEL_THINKING_ENABLED": {
-    "description": "启用视觉模型思考模式",
-    "type": "bool",
-    "default": true,
-    "hint": "是否为视觉模型启用思考模式，可能提高准确性但增加响应时间"
-  },
-  "VISION_MODEL_SYSTEM_PROMPT": {
-    "description": "视觉模型系统提示词",
-    "type": "text",
-    "default": "提取图片上的内容，特别是文字",
-    "hint": "自定义视觉模型的系统提示词，用于引导模型更好地识别图片内容",
-    "editor_mode": true,
-    "editor_language": "text"
-  },
   "MAX_DETECTION_QUEUE_SIZE": {
     "description": "最大检测队列大小",
     "type": "int",
     "default": 180,
-    "hint": "检测队列的最大容量，超出时会跳过新消息，避免内存占用过高"
+    "hint": "检测队列的最大容量，超出时会跳过新消息，避免内存占用过高。群聊消息过于频繁时建议调大此值",
   }
 }
