@@ -250,8 +250,16 @@ class SpamDetectorPlugin(Star):
             logger.info(f"模型返回: {result}")
             if result:
                 try:
+                    # 清理可能的markdown代码块格式
+                    cleaned_result = result.strip()
+                    if cleaned_result.startswith("```json"):
+                        cleaned_result = cleaned_result[7:]  # 移除开头的```json
+                    if cleaned_result.endswith("```"):
+                        cleaned_result = cleaned_result[:-3]  # 移除结尾的```
+                    cleaned_result = cleaned_result.strip()
+                    
                     # 解析JSON结果
-                    result_json = json.loads(result.strip())
+                    result_json = json.loads(cleaned_result)
                     spam_user_ids = result_json.get("y", [])
                     
                     # 确保返回的是字符串列表
@@ -562,11 +570,11 @@ class SpamDetectorPlugin(Star):
                 logger.warning("管理员群聊ID未配置，无法转发消息")
                 return
                 
-            platform_name = event.get_platform_name()
-            if platform_name != "aiocqhttp":
-                logger.warning(f"平台 {platform_name} 不支持合并转发，使用文本转发")
-                await self._forward_to_admin_text(admin_chat_id, group_id, user_id, user_name, user_messages, event)
-                return
+            # platform_name = event.get_platform_name()
+            # if platform_name != "aiocqhttp":
+            #     logger.warning(f"平台 {platform_name} 不支持合并转发，使用文本转发")
+            #     await self._forward_to_admin_text(admin_chat_id, group_id, user_id, user_name, user_messages, event)
+            #     return
             
             from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
             if not isinstance(event, AiocqhttpMessageEvent):
@@ -583,8 +591,19 @@ class SpamDetectorPlugin(Star):
             
             # 添加标题节点
             title_content = f"🚨 推销检测报告\n👤 用户: {user_name} ({user_id})\n🏷️ 原群聊: {group_name} ({group_id})\n⏰ 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            
+            # 获取机器人ID，处理可能的functools.partial对象
+            bot_id = getattr(client, 'self_id', '0')
+            if callable(bot_id):
+                try:
+                    bot_id = str(bot_id())
+                except:
+                    bot_id = '0'
+            else:
+                bot_id = str(bot_id)
+            
             nodes.append(Comp.Node(
-                uin=str(client.self_id),
+                uin=bot_id,
                 name="AstrBot反推销系统",
                 content=[Comp.Plain(title_content)]
             ))
@@ -877,23 +896,9 @@ class SpamDetectorPlugin(Star):
     async def _get_group_name(self, group_id: str) -> str:
         """获取群聊名称"""
         try:
-            # 尝试从事件信息中获取群聊名称
-            platform_meta = self.context.cached_platform_meta
-            if platform_meta and hasattr(platform_meta, 'aiocqhttp'):
-                adapter = platform_meta.aiocqhttp
-                if adapter:
-                    try:
-                        # 调用 get_group_info API 获取群信息
-                        group_info = await adapter.call_api("get_group_info", group_id=str(group_id))
-                        if group_info and 'group_name' in group_info:
-                            group_name = group_info['group_name']
-                            logger.debug(f"获取到群聊名称: {group_name} (群聊ID: {group_id})")
-                            return group_name
-                    except Exception as e:
-                        logger.debug(f"获取群聊名称失败: {e}")
-            
-            # 如果无法获取群聊名称，返回默认值
-            return "未知群聊"
+            # 简化实现，直接返回格式化的群聊名称
+            # TODO: 后续可以根据具体需求实现API调用获取真实群聊名称
+            return f"群聊{group_id}"
             
         except Exception as e:
             logger.warning(f"获取群聊名称时出错: {e}")
