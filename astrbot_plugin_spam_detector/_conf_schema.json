@@ -141,7 +141,7 @@
   "BATCH_MAX_TEXT_LENGTH": {
     "description": "批量处理最大文本长度（字符数）",
     "type": "int",
-    "default": 2000,
+    "default": 10000,
     "hint": "批量处理时所有消息内容的最大总字符数，超出此限制的消息将单独处理"
   },
   "MAX_DETECTION_QUEUE_SIZE": {
@@ -149,5 +149,11 @@
     "type": "int",
     "default": 180,
     "hint": "检测队列的最大容量，超出时会跳过新消息，避免内存占用过高。群聊消息过于频繁时建议调大此值"
+  },
+  "MAX_RECURSIVE_MESSAGES": {
+    "description": "合并转发递归检查最大消息数",
+    "type": "int",
+    "default": 16,
+    "hint": "递归检查合并转发消息时的最大消息数量限制，防止无限递归和内存占用过高"
   }
 }
