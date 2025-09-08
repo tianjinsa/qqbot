@@ -413,6 +413,31 @@ class SpamDetectorPlugin(Star):
             logger.warning(f"从事件提取图片内容时出错: {e}")
             return ""
     
+    def _is_message_still_in_pool(self, group_id: str, user_id: str, message_id: str = None) -> bool:
+        """检查指定的消息是否仍在消息池中"""
+        try:
+            if group_id not in self.group_message_pools:
+                return False
+            
+            if user_id not in self.group_message_pools[group_id]:
+                return False
+            
+            user_messages = self.group_message_pools[group_id][user_id]
+            
+            # 如果指定了消息ID，检查特定消息
+            if message_id:
+                for msg_record in user_messages:
+                    if msg_record.get("message_id") == message_id:
+                        return True
+                return False
+            
+            # 如果没有指定消息ID，检查该用户是否还有消息
+            return len(user_messages) > 0
+            
+        except Exception as e:
+            logger.warning(f"检查消息是否在池中时出错: {e}")
+            return False
+    
     def _get_message_original_components(self, group_id: str, user_id: str, message_id: str = None):
         """从消息池中获取指定消息的原始组件"""
         try:
@@ -453,11 +478,32 @@ class SpamDetectorPlugin(Star):
             
         logger.info(f"开始{batch_type}处理 {len(tasks)} 条消息")
         
-        # 构建批量输入
+        # 在模型检测前，先过滤掉已经不在消息池中的消息
+        valid_tasks = []
+        skipped_count = 0
+        
+        for task in tasks:
+            user_id, user_name, message_content, timestamp, event, image_content = self._extract_task_info(task)
+            
+            # 检查消息是否仍在消息池中
+            if self._is_message_still_in_pool(group_id, user_id):
+                valid_tasks.append(task)
+            else:
+                skipped_count += 1
+                logger.info(f"跳过已从消息池中移除的用户 {user_id} 的消息检测")
+        
+        if skipped_count > 0:
+            logger.info(f"跳过了 {skipped_count} 个已不在消息池中的任务，剩余 {len(valid_tasks)} 个有效任务")
+        
+        if not valid_tasks:
+            logger.info(f"{batch_type}处理完成：所有任务都已无效，跳过检测")
+            return
+        
+        # 构建批量输入（只使用有效任务）
         batch_input = {}
         task_map = {}
         
-        for task in tasks:
+        for task in valid_tasks:
             user_id, user_name, message_content, timestamp, event, image_content = self._extract_task_info(task)
             full_content = self._build_full_content(task)
             batch_input[user_id] = full_content
@@ -474,13 +520,24 @@ class SpamDetectorPlugin(Star):
             if user_id in task_map:
                 task = task_map[user_id]
                 user_id, user_name, message_content, timestamp, event, image_content = self._extract_task_info(task)
-                await self._handle_spam_detection_result(user_id, user_name, group_id, event, batch_type)
+                
+                # 再次检查消息是否仍在消息池中（双重检查）
+                if self._is_message_still_in_pool(group_id, user_id):
+                    await self._handle_spam_detection_result(user_id, user_name, group_id, event, batch_type)
+                else:
+                    logger.info(f"检测到推销但用户 {user_id} 的消息已从池中移除，跳过处理")
         
         logger.info(f"{batch_type}处理完成，发现 {len(spam_user_ids)} 个推销用户，分别是: {', '.join(spam_user_ids)}")
     
     async def _process_single_task(self, task: tuple, group_id: str, reason: str):
         """处理单个任务"""
         user_id, user_name, message_content, timestamp, event, image_content = self._extract_task_info(task)
+        
+        # 在模型检测前检查消息是否仍在消息池中
+        if not self._is_message_still_in_pool(group_id, user_id):
+            logger.info(f"跳过已从消息池中移除的用户 {user_id} 的单个任务处理")
+            return
+        
         full_content = self._build_full_content(task)
         
         logger.warning(f"{reason}: {full_content[:50]}... (用户: {user_name})")
@@ -490,7 +547,11 @@ class SpamDetectorPlugin(Star):
         spam_user_ids = await self._batch_spam_detection(single_batch_input)
         
         if user_id in spam_user_ids:
-            await self._handle_spam_detection_result(user_id, user_name, group_id, event, reason)
+            # 再次检查消息是否仍在消息池中（双重检查）
+            if self._is_message_still_in_pool(group_id, user_id):
+                await self._handle_spam_detection_result(user_id, user_name, group_id, event, reason)
+            else:
+                logger.info(f"检测到推销但用户 {user_id} 的消息已从池中移除，跳过单个任务处理")
     
     async def _handle_spam_detection_result(self, user_id: str, user_name: str, group_id: str, event, context: str):
         """处理推销检测结果"""
@@ -697,8 +758,13 @@ class SpamDetectorPlugin(Star):
                     logger.warning(f"extra_body thinking模式失败，回退到普通模式: {e}")
                     response = await client.chat.completions.create(**api_params)
             else:
-                response = await client.chat.completions.create(**api_params)
-            
+                logger.debug("使用extra_body方式关闭thinking模式")
+                response = await client.chat.completions.create(
+                    **api_params,
+                    extra_body={"thinking": {"type": "disabled"}}
+                )
+                logger.debug("成功使用extra_body方式关闭thinking模式")
+
             if response.choices and len(response.choices) > 0:
                 logger.debug(f"视觉模型调用成功，返回内容: {response.choices[0].message.content[:100]}...")
                 return response.choices[0].message.content
@@ -875,9 +941,9 @@ class SpamDetectorPlugin(Star):
             client = event.bot
             group_name = await self._get_group_name(group_id)
             
-            # 构建合并转发的节点列表
+            # 每次都重新构建合并转发的节点列表，确保不影响后续转发
             import astrbot.api.message_components as Comp
-            nodes = []
+            nodes = []  # 每次都创建新的节点列表
             
             # 添加标题节点
             title_content = f"🚨 推销检测报告\n👤 用户: {user_name} ({user_id})\n🏷️ 原群聊: {group_name} ({group_id})\n⏰ 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
@@ -892,31 +958,45 @@ class SpamDetectorPlugin(Star):
             else:
                 bot_id = str(bot_id)
             
-            nodes.append(Comp.Node(
+            # 创建新的标题节点
+            title_node = Comp.Node(
                 uin=bot_id,
                 name="AstrBot反推销系统",
                 content=[Comp.Plain(title_content)]
-            ))
+            )
+            nodes.append(title_node)
             
             # 添加每条被撤回的消息作为节点
             for i, msg_record in enumerate(user_messages):
                 timestamp_str = datetime.fromtimestamp(msg_record.get("timestamp", time.time())).strftime('%H:%M:%S')
                 
-                # 直接使用原始消息组件进行转发
+                # 获取原始消息组件
                 original_messages = msg_record.get("original_messages", [])
                 if original_messages:
-                    # 直接转发原始消息组件，只添加时间戳前缀
-                    node_content = [Comp.Plain(f"[{timestamp_str}]\n")] + original_messages
+                    # 先添加一个AstrBot系统发送的时间戳节点
+                    timestamp_node = Comp.Node(
+                        uin=bot_id,
+                        name="AstrBot反推销系统",
+                        content=[Comp.Plain(f"消息时间: {timestamp_str}")]
+                    )
+                    nodes.append(timestamp_node)
+                    
+                    # 然后为每个原始组件创建单独的节点，保持原始组件不变
+                    for j, original_comp in enumerate(original_messages):
+                        comp_node = Comp.Node(
+                            uin=str(user_id),
+                            name=f"{user_name}",
+                            content=[original_comp]  # 每个组件作为单独的节点内容
+                        )
+                        nodes.append(comp_node)
                 else:
-                    # 如果没有原始组件，使用空内容
-                    content_text = f"[{timestamp_str}] [消息内容已清理]"
-                    node_content = [Comp.Plain(content_text)]
-                
-                nodes.append(Comp.Node(
-                    uin=str(user_id),
-                    name=f"{user_name}",
-                    content=node_content
-                ))
+                    # 如果没有原始组件，添加一个说明节点
+                    empty_node = Comp.Node(
+                        uin=str(user_id),
+                        name=f"{user_name}",
+                        content=[Comp.Plain(f"[{timestamp_str}] [消息内容已清理]")]
+                    )
+                    nodes.append(empty_node)
             
             if len(nodes) <= 1:
                 logger.warning("没有有效的消息内容，跳过合并转发")
@@ -954,10 +1034,27 @@ class SpamDetectorPlugin(Star):
                 logger.warning(f"平台 {platform_name} 不支持合并转发")
             logger.info(f"合并转发结果: {ret}")
             
+            # 显式清理节点列表，确保不影响后续转发
+            for node in nodes:
+                node.content.clear() if hasattr(node.content, 'clear') else None
+            nodes.clear()
+            logger.debug("合并转发节点列表已清理")
+            
         except Exception as e:
             logger.error(f"合并转发失败: {e}", exc_info=True)
             # 回退到文本转发
             await self._forward_to_admin_text(admin_chat_id, group_id, user_id, user_name, user_messages, event)
+        finally:
+            # 最终清理，确保节点列表不会保留
+            try:
+                if 'nodes' in locals():
+                    for node in nodes:
+                        if hasattr(node, 'content') and hasattr(node.content, 'clear'):
+                            node.content.clear()
+                    nodes.clear()
+                    logger.debug("finally块中清理了合并转发节点列表")
+            except:
+                pass
     
     async def _forward_to_admin_text(self, admin_chat_id: str, group_id: str, user_id: str,
                                    user_name: str, user_messages: List[Dict], event: AstrMessageEvent):
