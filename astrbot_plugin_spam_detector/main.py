@@ -275,40 +275,6 @@ class SpamDetectorPlugin(Star):
             logger.warning(f"提取合并转发消息内容时出错: {e}")
             return ""
     
-    async def _build_node_content_from_original(self, original_messages, timestamp_str: str):
-        """从原始消息组件构建节点内容，保持原样转发"""
-        try:
-            node_content = []
-            
-            # 添加时间戳
-            node_content.append(Comp.Plain(f"[{timestamp_str}] "))
-            
-            # 处理每个消息组件
-            for msg_comp in original_messages:
-                if isinstance(msg_comp, Comp.Plain):
-                    # 文本消息直接添加
-                    node_content.append(msg_comp)
-                elif isinstance(msg_comp, Comp.Image):
-                    # 图片消息保持原样
-                    node_content.append(msg_comp)
-                elif hasattr(msg_comp, 'type') and getattr(msg_comp, 'type', '') == 'forward':
-                    # 合并转发消息，添加标识和递归内容
-                    forward_content = await self._extract_forward_content(msg_comp, "unknown", "unknown", 50)
-                    node_content.append(Comp.Plain(f"[合并转发: {forward_content}]"))
-                else:
-                    # 其他类型的消息组件，尝试保持原样或转换为文本
-                    try:
-                        node_content.append(msg_comp)
-                    except:
-                        # 如果无法直接添加，转换为文本描述
-                        node_content.append(Comp.Plain(f"[{type(msg_comp).__name__}]"))
-            
-            return node_content if node_content else [Comp.Plain(f"[{timestamp_str}] [空消息]")]
-            
-        except Exception as e:
-            logger.warning(f"构建节点内容时出错: {e}")
-            return [Comp.Plain(f"[{timestamp_str}] [消息构建失败]")]
-    
     async def _extract_image_content_from_event(self, event: AstrMessageEvent) -> str:
         """从事件中提取图片内容"""
         try:
@@ -820,22 +786,21 @@ class SpamDetectorPlugin(Star):
             for i, msg_record in enumerate(user_messages):
                 timestamp_str = datetime.fromtimestamp(msg_record.get("timestamp", time.time())).strftime('%H:%M:%S')
                 
-                # 尝试使用原始消息组件进行转发
+                # 直接使用原始消息组件进行转发
                 original_messages = msg_record.get("original_messages", [])
                 if original_messages:
-                    # 使用原始消息组件构建节点内容
-                    node_content = await self._build_node_content_from_original(original_messages, timestamp_str)
+                    # 直接转发原始消息组件，只添加时间戳前缀
+                    node_content = [Comp.Plain(f"[{timestamp_str}] ")] + original_messages
                 else:
-                    # 回退到文本内容
+                    # 如果没有原始组件，使用文本内容
                     content_text = f"[{timestamp_str}] {msg_record.get('content', '')}"
                     node_content = [Comp.Plain(content_text)]
                 
-                if node_content:  # 确保有内容才添加节点
-                    nodes.append(Comp.Node(
-                        uin=str(user_id),
-                        name=f"{user_name}",
-                        content=node_content
-                    ))
+                nodes.append(Comp.Node(
+                    uin=str(user_id),
+                    name=f"{user_name}",
+                    content=node_content
+                ))
             
             if len(nodes) <= 1:
                 logger.warning("没有有效的消息内容，跳过合并转发")
@@ -844,23 +809,33 @@ class SpamDetectorPlugin(Star):
             # 发送合并转发
             logger.info(f"发送合并转发到管理员群 {admin_chat_id}，包含 {len(nodes)} 个节点")
             
-            # 使用原生 CQHTTP API 发送合并转发
-            forward_msg = []
-            for node in nodes:
-                forward_msg.append({
-                    "type": "node",
-                    "data": {
-                        "uin": str(node.uin),
-                        "name": node.name,
-                        "content": [{"type": "text", "data": {"text": comp.text}} for comp in node.content if hasattr(comp, 'text')]
-                    }
-                })
-            
-            ret = await client.api.call_action(
-                'send_group_forward_msg',
-                group_id=str(admin_chat_id),
-                messages=forward_msg
-            )
+            # 直接发送合并转发，让底层自动处理所有消息格式
+            platform_name = event.get_platform_name()
+            if platform_name == "aiocqhttp":
+                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
+                if isinstance(event, AiocqhttpMessageEvent):
+                    client = event.bot
+                    
+                    # 构建原生转发消息，直接使用Node的content
+                    forward_msg = []
+                    for node in nodes:
+                        forward_msg.append({
+                            "type": "node",
+                            "data": {
+                                "uin": str(node.uin),
+                                "name": node.name,
+                                "content": node.content  # 直接使用Node的content，让CQHTTP自动处理
+                            }
+                        })
+                    
+                    ret = await client.api.call_action(
+                        'send_group_forward_msg',
+                        group_id=str(admin_chat_id),
+                        messages=forward_msg
+                    )
+                    logger.info(f"合并转发结果: {ret}")
+            else:
+                logger.warning(f"平台 {platform_name} 不支持合并转发")
             logger.info(f"合并转发结果: {ret}")
             
         except Exception as e:
