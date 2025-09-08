@@ -2,6 +2,7 @@ import asyncio
 import time
 import base64
 import json
+import os
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from openai import AsyncOpenAI
@@ -12,7 +13,7 @@ from astrbot.api import logger, AstrBotConfig
 import astrbot.api.message_components as Comp
 
 
-@register("astrbot_plugin_spam_detector", "AstrBot Dev Team", "智能防推销插件，使用AI检测并处理推销信息", "1.1.2", "https://github.com/AstrBotDevs/astrbot_plugin_spam_detector")
+@register("astrbot_plugin_spam_detector", "AstrBot Dev Team", "智能防推销插件，使用AI检测并处理推销信息", "1.1.3", "https://github.com/AstrBotDevs/astrbot_plugin_spam_detector")
 class SpamDetectorPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -151,247 +152,6 @@ class SpamDetectorPlugin(Star):
             full_content += f"\n图片内容：{image_content}"
         return full_content
     
-    async def _extract_all_message_content(self, event: AstrMessageEvent, user_id: str, user_name: str) -> str:
-        """提取所有消息内容，包括递归处理合并转发"""
-        try:
-            max_recursive_messages = int(self._get_config_value("MAX_RECURSIVE_MESSAGES", 100))
-            all_content = []
-            total_extracted = 0
-            
-            # 处理当前消息的所有组件
-            for msg_comp in event.get_messages():
-                if total_extracted >= max_recursive_messages:
-                    logger.warning(f"已达到递归消息最大数量限制: {max_recursive_messages}")
-                    break
-                    
-                content = await self._extract_message_component_content(msg_comp, user_id, user_name, max_recursive_messages - total_extracted)
-                if content:
-                    all_content.append(content)
-                    total_extracted += len(content.split('\n'))
-            
-            return '\n'.join(all_content) if all_content else event.message_str
-            
-        except Exception as e:
-            logger.warning(f"提取消息内容时出错: {e}")
-            return event.message_str
-    
-    async def _extract_message_component_content(self, msg_comp, user_id: str, user_name: str, remaining_limit: int) -> str:
-        """提取单个消息组件的内容，支持递归处理合并转发"""
-        try:
-            if remaining_limit <= 0:
-                return ""
-                
-            # 处理文本消息
-            if isinstance(msg_comp, Comp.Plain):
-                return msg_comp.text
-            
-            # 处理图片消息
-            elif isinstance(msg_comp, Comp.Image):
-                image_url = getattr(msg_comp, 'url', None) or getattr(msg_comp, 'file', None)
-                if image_url:
-                    image_content = await self._extract_image_content([image_url])
-                    return f"[图片内容: {image_content}]" if image_content else "[图片]"
-                return "[图片]"
-            
-            # 处理合并转发消息 - 这是关键部分
-            elif hasattr(msg_comp, 'type') and getattr(msg_comp, 'type', '') == 'forward':
-                return await self._extract_forward_content(msg_comp, user_id, user_name, remaining_limit)
-            
-            # 处理其他类型的消息组件
-            else:
-                # 尝试获取文本表示
-                if hasattr(msg_comp, 'text'):
-                    return msg_comp.text
-                elif hasattr(msg_comp, '__str__'):
-                    return str(msg_comp)
-                return f"[{type(msg_comp).__name__}]"
-                
-        except Exception as e:
-            logger.warning(f"提取消息组件内容时出错: {e}")
-            return ""
-    
-    async def _extract_forward_content(self, forward_comp, original_user_id: str, original_user_name: str, remaining_limit: int) -> str:
-        """递归提取合并转发消息的内容（BFS方式）"""
-        try:
-            forward_contents = []
-            processed_count = 0
-            
-            # 尝试多种方式获取合并转发的消息列表
-            forward_messages = []
-            
-            # 方式1: 尝试获取 messages 属性
-            if hasattr(forward_comp, 'messages') and forward_comp.messages:
-                forward_messages = forward_comp.messages
-                logger.debug(f"通过 messages 属性获取到 {len(forward_messages)} 条转发消息")
-            
-            # 方式2: 尝试获取 content 属性
-            elif hasattr(forward_comp, 'content') and forward_comp.content:
-                if isinstance(forward_comp.content, list):
-                    forward_messages = forward_comp.content
-                    logger.debug(f"通过 content 属性获取到 {len(forward_messages)} 条转发消息")
-                elif isinstance(forward_comp.content, str):
-                    # 如果content是字符串，尝试解析为JSON
-                    try:
-                        import json
-                        parsed_content = json.loads(forward_comp.content)
-                        if isinstance(parsed_content, list):
-                            forward_messages = parsed_content
-                            logger.debug(f"通过解析 content JSON 获取到 {len(forward_messages)} 条转发消息")
-                        elif isinstance(parsed_content, dict) and 'messages' in parsed_content:
-                            forward_messages = parsed_content['messages']
-                            logger.debug(f"通过解析 content JSON.messages 获取到 {len(forward_messages)} 条转发消息")
-                    except json.JSONDecodeError:
-                        logger.debug(f"content不是有效JSON: {forward_comp.content[:100]}...")
-            
-            # 方式3: 尝试获取 data 属性
-            elif hasattr(forward_comp, 'data') and forward_comp.data:
-                if isinstance(forward_comp.data, dict):
-                    if 'messages' in forward_comp.data:
-                        forward_messages = forward_comp.data['messages']
-                        logger.debug(f"通过 data.messages 属性获取到 {len(forward_messages)} 条转发消息")
-                    elif 'content' in forward_comp.data:
-                        forward_messages = forward_comp.data['content']
-                        logger.debug(f"通过 data.content 属性获取到 {len(forward_messages)} 条转发消息")
-            
-            # 方式4: 检查是否有其他可能的属性
-            else:
-                logger.debug(f"合并转发组件可用属性: {[attr for attr in dir(forward_comp) if not attr.startswith('_')]}")
-                # 尝试获取所有非私有属性
-                for attr in dir(forward_comp):
-                    if not attr.startswith('_'):
-                        attr_value = getattr(forward_comp, attr, None)
-                        if isinstance(attr_value, list) and len(attr_value) > 0:
-                            # 检查列表中的元素是否像消息对象
-                            first_item = attr_value[0]
-                            if hasattr(first_item, 'content') or hasattr(first_item, 'message') or hasattr(first_item, 'text'):
-                                forward_messages = attr_value
-                                logger.debug(f"通过 {attr} 属性获取到 {len(forward_messages)} 条转发消息")
-                                break
-            
-            if not forward_messages:
-                logger.warning(f"无法从合并转发组件中提取消息列表: {type(forward_comp).__name__}")
-                return f"[合并转发消息(来自用户{original_user_name}) - 内容解析失败]"
-            
-            # BFS处理合并转发中的每条消息
-            for i, msg in enumerate(forward_messages):
-                if processed_count >= remaining_limit:
-                    forward_contents.append(f"[...还有更多消息，已达到限制]")
-                    break
-                
-                # 提取消息内容
-                msg_content = await self._extract_forward_message_content(msg, original_user_id, original_user_name, remaining_limit - processed_count)
-                if msg_content:
-                    forward_contents.append(f"[转发内容{i+1}(归属于{original_user_name}): {msg_content}]")
-                    processed_count += 1
-            
-            result = '\n'.join(forward_contents) if forward_contents else f"[空合并转发消息(来自用户{original_user_name})]"
-            logger.debug(f"合并转发内容提取完成，总共 {processed_count} 条消息")
-            return result
-            
-        except Exception as e:
-            logger.warning(f"提取合并转发内容时出错: {e}")
-            return f"[合并转发消息提取失败(来自用户{original_user_name}): {str(e)}]"
-    
-    async def _extract_forward_message_content(self, forward_msg, original_user_id: str, original_user_name: str, remaining_limit: int) -> str:
-        """提取合并转发中单条消息的内容"""
-        try:
-            if remaining_limit <= 0:
-                return ""
-            
-            # 尝试获取消息内容
-            content_parts = []
-            
-            # 方式1: 处理消息文本内容
-            if hasattr(forward_msg, 'content') and forward_msg.content:
-                if isinstance(forward_msg.content, str):
-                    content_parts.append(forward_msg.content)
-                elif isinstance(forward_msg.content, list):
-                    for content_item in forward_msg.content:
-                        item_content = await self._extract_message_component_content(content_item, original_user_id, original_user_name, remaining_limit)
-                        if item_content:
-                            content_parts.append(item_content)
-                elif isinstance(forward_msg.content, dict):
-                    # 处理内容是字典的情况
-                    text_content = forward_msg.content.get('text', '') or forward_msg.content.get('message', '')
-                    if text_content:
-                        content_parts.append(text_content)
-            
-            # 方式2: 处理消息的其他字段
-            if hasattr(forward_msg, 'message') and forward_msg.message:
-                if isinstance(forward_msg.message, str):
-                    content_parts.append(forward_msg.message)
-                elif isinstance(forward_msg.message, list):
-                    for msg_item in forward_msg.message:
-                        item_content = await self._extract_message_component_content(msg_item, original_user_id, original_user_name, remaining_limit)
-                        if item_content:
-                            content_parts.append(item_content)
-            
-            # 方式3: 处理text字段
-            if hasattr(forward_msg, 'text') and forward_msg.text:
-                content_parts.append(forward_msg.text)
-            
-            # 方式4: 处理data字段
-            if hasattr(forward_msg, 'data') and forward_msg.data:
-                if isinstance(forward_msg.data, dict):
-                    text_data = forward_msg.data.get('text', '') or forward_msg.data.get('content', '') or forward_msg.data.get('message', '')
-                    if text_data:
-                        content_parts.append(text_data)
-                elif isinstance(forward_msg.data, str):
-                    content_parts.append(forward_msg.data)
-            
-            # 方式5: 尝试字符串化整个消息对象
-            if not content_parts and hasattr(forward_msg, '__str__'):
-                try:
-                    str_content = str(forward_msg)
-                    # 过滤掉明显的对象表示
-                    if not str_content.startswith('<') and len(str_content) > 0:
-                        content_parts.append(str_content)
-                except:
-                    pass
-            
-            # 方式6: 遍历所有非私有属性寻找文本内容
-            if not content_parts:
-                for attr in dir(forward_msg):
-                    if not attr.startswith('_') and attr not in ['content', 'message', 'text', 'data']:
-                        try:
-                            attr_value = getattr(forward_msg, attr, None)
-                            if isinstance(attr_value, str) and len(attr_value) > 0 and len(attr_value) < 1000:
-                                # 排除明显的对象表示、方法名等
-                                if not (attr_value.startswith('<') or attr_value.startswith('bound method') or 
-                                       attr_value in ['__main__', '__init__', 'self']):
-                                    content_parts.append(f"{attr}:{attr_value}")
-                                    logger.debug(f"从属性 {attr} 提取到内容: {attr_value[:50]}...")
-                        except:
-                            continue
-            
-            # 处理发送者信息
-            sender_info = ""
-            sender_name = getattr(forward_msg, 'sender_name', '') or getattr(forward_msg, 'name', '') or getattr(forward_msg, 'nickname', '')
-            if sender_name and sender_name != original_user_name:
-                sender_info = f"(原发送者: {sender_name})"
-            
-            # 组合结果
-            result_parts = []
-            if content_parts:
-                result_parts.extend(content_parts)
-            if sender_info:
-                result_parts.append(sender_info)
-            
-            final_content = ' '.join(result_parts) if result_parts else ""
-            
-            if final_content:
-                logger.debug(f"成功提取转发消息内容: {final_content[:100]}...")
-            else:
-                logger.debug(f"转发消息内容为空，消息对象类型: {type(forward_msg).__name__}")
-                # 输出调试信息
-                logger.debug(f"消息对象可用属性: {[attr for attr in dir(forward_msg) if not attr.startswith('_')]}")
-            
-            return final_content
-            
-        except Exception as e:
-            logger.warning(f"提取合并转发消息内容时出错: {e}")
-            return ""
-    
     async def _extract_image_content_from_event(self, event: AstrMessageEvent) -> str:
         """从事件中提取图片内容"""
         try:
@@ -437,34 +197,6 @@ class SpamDetectorPlugin(Star):
         except Exception as e:
             logger.warning(f"检查消息是否在池中时出错: {e}")
             return False
-    
-    def _get_message_original_components(self, group_id: str, user_id: str, message_id: str = None):
-        """从消息池中获取指定消息的原始组件"""
-        try:
-            if group_id not in self.group_message_pools:
-                return []
-            
-            if user_id not in self.group_message_pools[group_id]:
-                return []
-            
-            user_messages = self.group_message_pools[group_id][user_id]
-            
-            # 如果指定了消息ID，查找特定消息
-            if message_id:
-                for msg_record in user_messages:
-                    if msg_record.get("message_id") == message_id:
-                        return msg_record.get("original_messages", [])
-                return []
-            
-            # 如果没有指定消息ID，返回最新消息的原始组件
-            if user_messages:
-                return user_messages[-1].get("original_messages", [])
-            
-            return []
-            
-        except Exception as e:
-            logger.warning(f"获取消息原始组件时出错: {e}")
-            return []
     
     def _extract_task_info(self, task: tuple) -> tuple:
         """提取任务信息"""
@@ -926,12 +658,6 @@ class SpamDetectorPlugin(Star):
                 logger.warning("管理员群聊ID未配置，无法转发消息")
                 return
                 
-            # platform_name = event.get_platform_name()
-            # if platform_name != "aiocqhttp":
-            #     logger.warning(f"平台 {platform_name} 不支持合并转发，使用文本转发")
-            #     await self._forward_to_admin_text(admin_chat_id, group_id, user_id, user_name, user_messages, event)
-            #     return
-            
             from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
             if not isinstance(event, AiocqhttpMessageEvent):
                 logger.warning("事件类型不是 AiocqhttpMessageEvent，无法使用合并转发")
@@ -942,7 +668,6 @@ class SpamDetectorPlugin(Star):
             group_name = await self._get_group_name(group_id)
             
             # 每次都重新构建合并转发的节点列表，确保不影响后续转发
-            import astrbot.api.message_components as Comp
             nodes = []  # 每次都创建新的节点列表
             
             # 添加标题节点
@@ -983,11 +708,34 @@ class SpamDetectorPlugin(Star):
                     
                     # 然后为每个原始组件创建单独的节点，保持原始组件不变
                     for j, original_comp in enumerate(original_messages):
-                        comp_node = Comp.Node(
-                            uin=str(user_id),
-                            name=f"{user_name}",
-                            content=[original_comp]  # 每个组件作为单独的节点内容
-                        )
+                        # 检查是否为合并转发类型的组件
+                        is_forward_comp = False
+                        
+                        # 检查是否为合并转发消息
+                        if hasattr(original_comp, 'type') and getattr(original_comp, 'type', '') == 'forward':
+                            is_forward_comp = True
+                        elif type(original_comp).__name__.lower() in ['forward', 'forwardmessage', 'merge', 'mergeforward']:
+                            is_forward_comp = True
+                        elif hasattr(original_comp, 'messages') or (hasattr(original_comp, 'content') and 
+                            isinstance(getattr(original_comp, 'content'), list) and 
+                            len(getattr(original_comp, 'content')) > 0):
+                            # 可能是合并转发消息
+                            is_forward_comp = True
+                        
+                        if is_forward_comp:
+                            # 合并转发消息显示为特殊文本
+                            comp_node = Comp.Node(
+                                uin=str(user_id),
+                                name=f"{user_name}",
+                                content=[Comp.Plain("[合并消息无法显示]")]
+                            )
+                        else:
+                            # 其他类型的组件正常显示
+                            comp_node = Comp.Node(
+                                uin=str(user_id),
+                                name=f"{user_name}",
+                                content=[original_comp]  # 每个组件作为单独的节点内容
+                            )
                         nodes.append(comp_node)
                 else:
                     # 如果没有原始组件，添加一个说明节点
@@ -1032,7 +780,6 @@ class SpamDetectorPlugin(Star):
                     logger.info(f"合并转发结果: {ret}")
             else:
                 logger.warning(f"平台 {platform_name} 不支持合并转发")
-            logger.info(f"合并转发结果: {ret}")
             
             # 显式清理节点列表，确保不影响后续转发
             for node in nodes:
@@ -1124,7 +871,6 @@ class SpamDetectorPlugin(Star):
                 else:
                     # 本地文件路径，转换为base64
                     try:
-                        import os
                         if os.path.exists(url):
                             with open(url, "rb") as image_file:
                                 image_data = base64.b64encode(image_file.read()).decode()
@@ -1323,7 +1069,17 @@ class SpamDetectorPlugin(Star):
                 
                 # 处理合并转发消息
                 elif hasattr(msg_comp, 'type') and getattr(msg_comp, 'type', '') == 'forward':
-                    text_parts.append("[合并转发]")
+                    text_parts.append("[合并消息无法显示]")
+                
+                # 检查其他可能的合并转发标识
+                elif type(msg_comp).__name__.lower() in ['forward', 'forwardmessage', 'merge', 'mergeforward']:
+                    text_parts.append("[合并消息无法显示]")
+                
+                # 检查是否有forward相关属性
+                elif hasattr(msg_comp, 'messages') or (hasattr(msg_comp, 'content') and 
+                    isinstance(getattr(msg_comp, 'content'), list) and 
+                    len(getattr(msg_comp, 'content')) > 0):
+                    text_parts.append("[合并消息无法显示]")
                 
                 # 处理其他类型的消息组件
                 else:
@@ -1346,10 +1102,31 @@ class SpamDetectorPlugin(Star):
             return "[消息内容解析失败]"
     
     def _should_process_message_type(self, event: AstrMessageEvent) -> bool:
-        """检查消息类型是否需要处理（只处理文本、图片和合并转发）"""
+        """检查消息类型是否需要处理（只处理文本和图片，不处理合并转发）"""
         try:
             message_components = event.get_messages()
             
+            # 先检查是否包含合并转发消息，如果是则不进入处理队列
+            for msg_comp in message_components:
+                # 检查是否为合并转发消息
+                if hasattr(msg_comp, 'type') and getattr(msg_comp, 'type', '') == 'forward':
+                    logger.debug("检测到合并转发消息，不进入处理队列")
+                    return False
+                
+                # 检查其他可能的合并转发标识
+                elif type(msg_comp).__name__.lower() in ['forward', 'forwardmessage', 'merge', 'mergeforward']:
+                    logger.debug("检测到合并转发消息，不进入处理队列")
+                    return False
+                
+                # 检查是否有forward相关属性
+                elif hasattr(msg_comp, 'messages') or (hasattr(msg_comp, 'content') and 
+                    isinstance(getattr(msg_comp, 'content'), list) and 
+                    len(getattr(msg_comp, 'content')) > 0):
+                    # 可能是合并转发消息
+                    logger.debug("检测到疑似合并转发消息，不进入处理队列")
+                    return False
+            
+            # 检查是否包含可处理的消息类型（文本或图片）
             for msg_comp in message_components:
                 # 检查是否为文本消息
                 if isinstance(msg_comp, Comp.Plain):
@@ -1358,23 +1135,8 @@ class SpamDetectorPlugin(Star):
                 # 检查是否为图片消息
                 elif isinstance(msg_comp, Comp.Image):
                     return True
-                
-                # 检查是否为合并转发消息
-                elif hasattr(msg_comp, 'type') and getattr(msg_comp, 'type', '') == 'forward':
-                    return True
-                
-                # 检查其他可能的合并转发标识
-                elif type(msg_comp).__name__.lower() in ['forward', 'forwardmessage', 'merge', 'mergeforward']:
-                    return True
-                
-                # 检查是否有forward相关属性
-                elif hasattr(msg_comp, 'messages') or (hasattr(msg_comp, 'content') and 
-                    isinstance(getattr(msg_comp, 'content'), list) and 
-                    len(getattr(msg_comp, 'content')) > 0):
-                    # 可能是合并转发消息
-                    return True
             
-            # 如果没有找到文本、图片或合并转发组件，检查是否有消息文本
+            # 如果没有找到文本或图片组件，检查是否有消息文本
             if event.message_str and event.message_str.strip():
                 return True
             
@@ -1444,16 +1206,7 @@ class SpamDetectorPlugin(Star):
                 logger.warning(f"检测队列已满 ({self.detection_queue.qsize()})，跳过当前消息")
                 return
             
-            # 提取所有消息内容，包括递归处理合并转发
-            all_message_content = await self._extract_all_message_content(event, user_id, user_name)
-            
-            # 如果有递归提取的内容，合并到主消息内容中
-            if all_message_content and all_message_content != message_content:
-                logger.info(f"检测到合并转发或其他复杂消息，总内容长度: {len(all_message_content)}")
-                message_content = all_message_content
-            
             # 提取图片内容
-            image_urls = []
             image_content = await self._extract_image_content_from_event(event)
             if image_content:
                 logger.info(f"图片内容提取成功: {image_content[:100]}...")
@@ -1472,8 +1225,6 @@ class SpamDetectorPlugin(Star):
     async def test_spam_detection(self, event: AstrMessageEvent, message: str = ""):
         """测试推销检测功能"""
         try:
-            # 将所有参数合并为一个消息字符串
-            # message = " ".join(args) if args else ""
             
             if not message:
                 yield event.plain_result(
