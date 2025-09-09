@@ -11,6 +11,8 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
 import astrbot.api.message_components as Comp
+from astrbot.core.platform.aiocqhttp.message_event import AiocqhttpMessageEvent
+from astrbot.platforms.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
 
 
 @register("astrbot_plugin_spam_detector", "AstrBot Dev Team", "智能防推销插件，使用AI检测并处理推销信息", "1.1.3", "https://github.com/AstrBotDevs/astrbot_plugin_spam_detector")
@@ -27,6 +29,8 @@ class SpamDetectorPlugin(Star):
         # 批量处理缓冲区：群聊ID -> [检测任务列表]
         self.batch_buffer = {}  # type: Dict[str, List[tuple]]
         self.batch_timer = {}  # type: Dict[str, float]
+        # 用户处理锁：防止同一用户被并发处理
+        self.processing_users = set()  # 存储 (group_id, user_id)
         
     async def initialize(self):
         """插件初始化"""
@@ -234,56 +238,91 @@ class SpamDetectorPlugin(Star):
         # 构建批量输入（只使用有效任务）
         batch_input = {}
         task_map = {}
+        users_to_lock = set()  # 需要加锁的用户
         
         for task in valid_tasks:
             user_id, user_name, message_content, timestamp, event, image_content = self._extract_task_info(task)
+            user_lock = (group_id, user_id)
+            
+            # 检查用户是否已在处理中
+            if user_lock in self.processing_users:
+                logger.info(f"用户 {user_name} ({user_id}) 已在处理中，跳过检测")
+                continue
+            
             full_content = self._build_full_content(task)
             batch_input[user_id] = full_content
             task_map[user_id] = task
+            users_to_lock.add(user_lock)
         
-        # 批量检测
-        total_chars = sum(len(content) for content in batch_input.values())
-        logger.info(f"{batch_type}检测 {len(batch_input)} 条消息，总字符数: {total_chars}")
+        if not batch_input:
+            logger.info(f"{batch_type}处理完成：所有任务都被跳过或无效")
+            return
         
-        spam_user_ids = await self._batch_spam_detection(batch_input)
+        # 为所有用户加锁
+        for user_lock in users_to_lock:
+            self.processing_users.add(user_lock)
         
-        # 处理检测结果
-        for user_id in spam_user_ids:
-            if user_id in task_map:
-                task = task_map[user_id]
-                user_id, user_name, message_content, timestamp, event, image_content = self._extract_task_info(task)
-                
-                # 再次检查消息是否仍在消息池中（双重检查）
-                if self._is_message_still_in_pool(group_id, user_id):
-                    await self._handle_spam_detection_result(user_id, user_name, group_id, event, batch_type)
-                else:
-                    logger.info(f"检测到推销但用户 {user_id} 的消息已从池中移除，跳过处理")
-        
-        logger.info(f"{batch_type}处理完成，发现 {len(spam_user_ids)} 个推销用户，分别是: {', '.join(spam_user_ids)}")
+        try:
+            # 批量检测
+            total_chars = sum(len(content) for content in batch_input.values())
+            logger.info(f"{batch_type}检测 {len(batch_input)} 条消息，总字符数: {total_chars}")
+            
+            spam_user_ids = await self._batch_spam_detection(batch_input)
+            
+            # 处理检测结果
+            for user_id in spam_user_ids:
+                if user_id in task_map:
+                    task = task_map[user_id]
+                    user_id, user_name, message_content, timestamp, event, image_content = self._extract_task_info(task)
+                    
+                    # 再次检查消息是否仍在消息池中（双重检查）
+                    if self._is_message_still_in_pool(group_id, user_id):
+                        await self._handle_spam_detection_result(user_id, user_name, group_id, event, batch_type)
+                    else:
+                        logger.info(f"检测到推销但用户 {user_id} 的消息已从池中移除，跳过处理")
+            
+            logger.info(f"{batch_type}处理完成，发现 {len(spam_user_ids)} 个推销用户，分别是: {', '.join(spam_user_ids)}")
+        finally:
+            # 确保处理完成后移除所有锁
+            for user_lock in users_to_lock:
+                self.processing_users.discard(user_lock)
     
     async def _process_single_task(self, task: tuple, group_id: str, reason: str):
         """处理单个任务"""
         user_id, user_name, message_content, timestamp, event, image_content = self._extract_task_info(task)
+        user_lock = (group_id, user_id)
+        
+        # 检查用户是否已在处理中
+        if user_lock in self.processing_users:
+            logger.info(f"用户 {user_name} ({user_id}) 已在处理中，跳过单个任务处理")
+            return
         
         # 在模型检测前检查消息是否仍在消息池中
         if not self._is_message_still_in_pool(group_id, user_id):
             logger.info(f"跳过已从消息池中移除的用户 {user_id} 的单个任务处理")
             return
         
-        full_content = self._build_full_content(task)
+        # 为用户加锁
+        self.processing_users.add(user_lock)
         
-        logger.warning(f"{reason}: {full_content[:50]}... (用户: {user_name})")
-        
-        # 使用单条批量检测
-        single_batch_input = {user_id: full_content}
-        spam_user_ids = await self._batch_spam_detection(single_batch_input)
-        
-        if user_id in spam_user_ids:
-            # 再次检查消息是否仍在消息池中（双重检查）
-            if self._is_message_still_in_pool(group_id, user_id):
-                await self._handle_spam_detection_result(user_id, user_name, group_id, event, reason)
-            else:
-                logger.info(f"检测到推销但用户 {user_id} 的消息已从池中移除，跳过单个任务处理")
+        try:
+            full_content = self._build_full_content(task)
+            
+            logger.warning(f"{reason}: {full_content[:50]}... (用户: {user_name})")
+            
+            # 使用单条批量检测
+            single_batch_input = {user_id: full_content}
+            spam_user_ids = await self._batch_spam_detection(single_batch_input)
+            
+            if user_id in spam_user_ids:
+                # 再次检查消息是否仍在消息池中（双重检查）
+                if self._is_message_still_in_pool(group_id, user_id):
+                    await self._handle_spam_detection_result(user_id, user_name, group_id, event, reason)
+                else:
+                    logger.info(f"检测到推销但用户 {user_id} 的消息已从池中移除，跳过单个任务处理")
+        finally:
+            # 确保处理完成后移除锁
+            self.processing_users.discard(user_lock)
     
     async def _handle_spam_detection_result(self, user_id: str, user_name: str, group_id: str, event, context: str):
         """处理推销检测结果"""
@@ -616,33 +655,27 @@ class SpamDetectorPlugin(Star):
     def _clear_user_detection_queue(self, group_id: str, user_id: str):
         """从检测队列中清理指定群聊指定用户的待处理任务"""
         try:
-            # 创建临时队列存储不需要清理的任务
-            temp_queue = asyncio.Queue()
+            # 将队列中需要保留的任务暂存到列表中
+            tasks_to_keep = []
             cleared_count = 0
             
-            # 从原队列中取出所有任务
             while not self.detection_queue.empty():
                 try:
                     task = self.detection_queue.get_nowait()
                     task_group_id, task_user_id = task[0], task[1]
                     
-                    # 如果不是要清理的用户任务，放入临时队列
-                    if task_group_id != group_id or task_user_id != user_id:
-                        temp_queue.put_nowait(task)
-                    else:
+                    if task_group_id == group_id and task_user_id == user_id:
                         cleared_count += 1
                         logger.debug(f"从队列中清除任务: 群聊{task_group_id}, 用户{task_user_id}")
-                        
+                    else:
+                        tasks_to_keep.append(task)
                 except asyncio.QueueEmpty:
+                    # 在并发环境下，队列可能在检查后变空
                     break
             
-            # 将临时队列中的任务放回原队列
-            while not temp_queue.empty():
-                try:
-                    task = temp_queue.get_nowait()
-                    self.detection_queue.put_nowait(task)
-                except asyncio.QueueEmpty:
-                    break
+            # 将保留的任务放回队列
+            for task in tasks_to_keep:
+                self.detection_queue.put_nowait(task)
             
             if cleared_count > 0:
                 logger.info(f"已从检测队列中清除 {cleared_count} 个重复任务 (群聊: {group_id}, 用户: {user_id})")
@@ -658,14 +691,14 @@ class SpamDetectorPlugin(Star):
                 logger.warning("管理员群聊ID未配置，无法转发消息")
                 return
                 
-            from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
-            if not isinstance(event, AiocqhttpMessageEvent):
-                logger.warning("事件类型不是 AiocqhttpMessageEvent，无法使用合并转发")
+            # 检查事件类型
+            if not hasattr(event, 'bot'):
+                logger.warning("事件对象没有bot属性，无法使用合并转发")
                 await self._forward_to_admin_text(admin_chat_id, group_id, user_id, user_name, user_messages, event)
                 return
             
             client = event.bot
-            group_name = await self._get_group_name(group_id)
+            group_name = await self._get_group_name(event, group_id)
             
             # 每次都重新构建合并转发的节点列表，确保不影响后续转发
             nodes = []  # 每次都创建新的节点列表
@@ -738,13 +771,8 @@ class SpamDetectorPlugin(Star):
                             )
                         nodes.append(comp_node)
                 else:
-                    # 如果没有原始组件，添加一个说明节点
-                    empty_node = Comp.Node(
-                        uin=str(user_id),
-                        name=f"{user_name}",
-                        content=[Comp.Plain(f"[{timestamp_str}] [消息内容已清理]")]
-                    )
-                    nodes.append(empty_node)
+                    # 如果没有原始组件，不添加内容，并报错，说明有重复检测
+                    logger.warning(f"用户 {user_id} 的消息记录中缺少原始组件，可能是重复检测")
             
             if len(nodes) <= 1:
                 logger.warning("没有有效的消息内容，跳过合并转发")
@@ -756,30 +784,30 @@ class SpamDetectorPlugin(Star):
             # 直接发送合并转发，让底层自动处理所有消息格式
             platform_name = event.get_platform_name()
             if platform_name == "aiocqhttp":
-                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
-                if isinstance(event, AiocqhttpMessageEvent):
-                    client = event.bot
-                    
-                    # 构建原生转发消息，直接使用Node的content
-                    forward_msg = []
-                    for node in nodes:
-                        forward_msg.append({
-                            "type": "node",
-                            "data": {
-                                "uin": str(node.uin),
-                                "name": node.name,
-                                "content": node.content  # 直接使用Node的content，让CQHTTP自动处理
-                            }
-                        })
-                    
-                    ret = await client.api.call_action(
-                        'send_group_forward_msg',
-                        group_id=str(admin_chat_id),
-                        messages=forward_msg
-                    )
-                    logger.info(f"合并转发结果: {ret}")
+                client = event.bot
+                
+                # 构建原生转发消息，直接使用Node的content
+                forward_msg = []
+                for node in nodes:
+                    forward_msg.append({
+                        "type": "node",
+                        "data": {
+                            "uin": str(node.uin),
+                            "name": node.name,
+                            "content": node.content  # 直接使用Node的content，让CQHTTP自动处理
+                        }
+                    })
+                
+                ret = await client.api.call_action(
+                    'send_group_forward_msg',
+                    group_id=str(admin_chat_id),
+                    messages=forward_msg
+                )
+                logger.info(f"合并转发结果: {ret}")
             else:
                 logger.warning(f"平台 {platform_name} 不支持合并转发")
+                await self._forward_to_admin_text(admin_chat_id, group_id, user_id, user_name, user_messages, event)
+                return
             
             # 显式清理节点列表，确保不影响后续转发
             for node in nodes:
@@ -807,7 +835,7 @@ class SpamDetectorPlugin(Star):
                                    user_name: str, user_messages: List[Dict], event: AstrMessageEvent):
         """文本形式转发到管理员群（作为合并转发的备用方案）"""
         try:
-            group_name = await self._get_group_name(group_id)
+            group_name = await self._get_group_name(event, group_id)
             
             # 构建转发内容
             forward_content = f"🚨 推销检测报告\n"
@@ -831,15 +859,13 @@ class SpamDetectorPlugin(Star):
             
             platform_name = event.get_platform_name()
             if platform_name == "aiocqhttp":
-                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
-                if isinstance(event, AiocqhttpMessageEvent):
-                    client = event.bot
-                    ret = await client.api.call_action(
-                        'send_group_msg',
-                        group_id=str(admin_chat_id),
-                        message=forward_content
-                    )
-                    logger.info(f"文本转发结果: {ret}")
+                client = event.bot
+                ret = await client.api.call_action(
+                    'send_group_msg',
+                    group_id=str(admin_chat_id),
+                    message=forward_content
+                )
+                logger.info(f"文本转发结果: {ret}")
             
         except Exception as e:
             logger.error(f"文本转发失败: {e}", exc_info=True)
@@ -1000,16 +1026,14 @@ class SpamDetectorPlugin(Star):
         """尝试根据消息ID撤回消息"""
         try:
             platform_name = event.get_platform_name()
-            if platform_name == "aiocqhttp":
-                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
-                if isinstance(event, AiocqhttpMessageEvent):
-                    client = event.bot
-                    payloads = {
-                        "message_id": message_id,
-                    }
-                    ret = await client.api.call_action('delete_msg', **payloads)
-                    logger.debug(f"撤回消息 {message_id} 返回: {ret}")
-                    return True
+            if platform_name == "aiocqhttp" and hasattr(event, 'bot'):
+                client = event.bot
+                payloads = {
+                    "message_id": message_id,
+                }
+                ret = await client.api.call_action('delete_msg', **payloads)
+                logger.debug(f"撤回消息 {message_id} 返回: {ret}")
+                return True
             return False
         except Exception as e:
             logger.debug(f"撤回消息 {message_id} 失败: {e}")
@@ -1021,33 +1045,31 @@ class SpamDetectorPlugin(Star):
             platform_name = event.get_platform_name()
             logger.info(f"尝试禁言用户 {user_id}，时长: {duration}秒，平台: {platform_name}")
             
-            if platform_name == "aiocqhttp":
-                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
-                if isinstance(event, AiocqhttpMessageEvent):
-                    client = event.bot
-                    group_id = event.get_group_id()
+            if platform_name == "aiocqhttp" and hasattr(event, 'bot'):
+                client = event.bot
+                group_id = event.get_group_id()
+                
+                if group_id:
+                    payloads = {
+                        "group_id": str(group_id),
+                        "user_id": str(user_id),
+                        "duration": duration  # 禁言时长（秒）
+                    }
+                    logger.debug(f"调用 set_group_ban API，payloads: {payloads}")
+                    ret = await client.api.call_action('set_group_ban', **payloads)
+                    logger.debug(f"禁言用户 {user_id} 返回: {ret}")
                     
-                    if group_id:
-                        payloads = {
-                            "group_id": str(group_id),
-                            "user_id": str(user_id),
-                            "duration": duration  # 禁言时长（秒）
-                        }
-                        logger.debug(f"调用 set_group_ban API，payloads: {payloads}")
-                        ret = await client.api.call_action('set_group_ban', **payloads)
-                        logger.debug(f"禁言用户 {user_id} 返回: {ret}")
-                        
-                        # 计算禁言时长的可读格式
-                        if duration >= 3600:
-                            duration_str = f"{duration // 3600}小时{(duration % 3600) // 60}分钟"
-                        elif duration >= 60:
-                            duration_str = f"{duration // 60}分钟"
-                        else:
-                            duration_str = f"{duration}秒"
-                        
-                        logger.info(f"✅ 已禁言用户 {user_id}，时长: {duration_str}")
+                    # 计算禁言时长的可读格式
+                    if duration >= 3600:
+                        duration_str = f"{duration // 3600}小时{(duration % 3600) // 60}分钟"
+                    elif duration >= 60:
+                        duration_str = f"{duration // 60}分钟"
                     else:
-                        logger.warning(f"无法禁言用户 {user_id}: 群聊ID不存在")
+                        duration_str = f"{duration}秒"
+                    
+                    logger.info(f"✅ 已禁言用户 {user_id}，时长: {duration_str}")
+                else:
+                    logger.warning(f"无法禁言用户 {user_id}: 群聊ID不存在")
             else:
                 logger.warning(f"平台 {platform_name} 不支持禁言功能")
         except Exception as e:
@@ -1148,11 +1170,18 @@ class SpamDetectorPlugin(Star):
             # 出错时默认处理
             return True
     
-    async def _get_group_name(self, group_id: str) -> str:
+    async def _get_group_name(self, event: AstrMessageEvent, group_id: str) -> str:
         """获取群聊名称"""
         try:
-            # 简化实现，直接返回格式化的群聊名称
-            # TODO: 后续可以根据具体需求实现API调用获取真实群聊名称
+            platform_name = event.get_platform_name()
+            if platform_name == "aiocqhttp" and hasattr(event, 'bot'):
+                client = event.bot
+                group_list = await client.api.call_action('get_group_list')
+                for group in group_list:
+                    if str(group['group_id']) == group_id:
+                        return group['group_name']
+            
+            # 如果没有找到，返回格式化的群聊名称
             return f"群聊{group_id}"
             
         except Exception as e:
