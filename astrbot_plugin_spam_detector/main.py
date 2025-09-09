@@ -11,8 +11,6 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
 import astrbot.api.message_components as Comp
-from astrbot.core.platform.aiocqhttp.message_event import AiocqhttpMessageEvent
-from astrbot.platforms.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
 
 
 @register("astrbot_plugin_spam_detector", "AstrBot Dev Team", "智能防推销插件，使用AI检测并处理推销信息", "1.1.3", "https://github.com/AstrBotDevs/astrbot_plugin_spam_detector")
