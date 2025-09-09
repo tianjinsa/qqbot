@@ -325,7 +325,9 @@ class SpamDetectorPlugin(Star):
     async def _handle_spam_detection_result(self, user_id: str, user_name: str, group_id: str, event, context: str):
         """处理推销检测结果"""
         logger.info(f"🚨 {context}检测到推销消息，用户: {user_name} ({user_id}), 群聊: {group_id}")
-        await self._handle_spam_message_new(event, group_id, user_id, user_name)
+        result = await self._handle_spam_message_new(event, group_id, user_id, user_name)
+        if result:
+            await event.send(result)
     
     async def _batch_spam_detection(self, batch_input: Dict[str, str]) -> List[str]:
         """批量推销检测，返回被识别为推销的用户ID列表"""
