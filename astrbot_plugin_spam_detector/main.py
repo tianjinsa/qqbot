@@ -3,10 +3,6 @@ import time
 import base64
 import json
 import os
-import asyncio
-import time
-import json
-import base64
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from openai import AsyncOpenAI
@@ -14,7 +10,7 @@ from openai import AsyncOpenAI
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
-from astrbot.api.message import Comp
+import astrbot.api.message_components as Comp
 
 
 @register("astrbot_plugin_spam_detector", "AstrBot Dev Team", "智能防推销插件，使用AI检测并处理推销信息", "1.1.3", "https://github.com/AstrBotDevs/astrbot_plugin_spam_detector")
@@ -42,7 +38,7 @@ class SpamDetectorPlugin(Star):
         """插件初始化"""
         logger.info("防推销插件已启动")
         # 初始化AI调用并发限制
-        max_concurrent_ai_calls = int(self._get_config_value("MAX_CONCURRENT_AI_CALLS", 3))
+        max_concurrent_ai_calls = int(self._get_config_value("MAX_CONCURRENT_AI_CALLS", 2))
         self.ai_semaphore = asyncio.Semaphore(max_concurrent_ai_calls)
         logger.info(f"AI调用并发限制已设置为: {max_concurrent_ai_calls}")
         # 启动检测队列处理器
@@ -60,43 +56,47 @@ class SpamDetectorPlugin(Star):
                 rate_limit = float(self._get_config_value("QUEUE_RATE_LIMIT", 1.0))
                 batch_wait_time = float(self._get_config_value("BATCH_WAIT_TIME", 5.0))
                 
-                # 等待队列中的检测任务
-                detection_task = await self.detection_queue.get()
-                group_id, user_id, user_name, message_content, timestamp, event = detection_task
+                # 等待队列中的检测任务或超时触发批量处理
+                try:
+                    detection_task = await asyncio.wait_for(self.detection_queue.get(), timeout=batch_wait_time)
+                    timeout_occurred = False
+                except asyncio.TimeoutError:
+                    timeout_occurred = True
                 
-                # 初始化群聊的批量缓冲区
-                if group_id not in self.batch_buffer:
-                    self.batch_buffer[group_id] = []
-                    self.batch_timer[group_id] = time.time()
-                
-                # 添加任务到批量缓冲区
-                self.batch_buffer[group_id].append(detection_task)
-                
-                # 检查是否需要批量处理
-                should_process = (
-                    len(self.batch_buffer[group_id]) >= batch_size or  # 达到批量大小
-                    time.time() - self.batch_timer[group_id] > batch_wait_time  # 超过设定的等待时间
-                )
-                
-                if should_process:
-                    # 速率限制：确保距离上次调用至少rate_limit秒
-                    now = time.time()
-                    time_since_last_call = now - self.last_model_call_time
-                    if time_since_last_call < rate_limit:
-                        await asyncio.sleep(rate_limit - time_since_last_call)
-                    
-                    # 更新最后调用时间
-                    self.last_model_call_time = time.time()
-                    
-                    # 处理批量任务
-                    tasks_to_process = self.batch_buffer[group_id].copy()
-                    self.batch_buffer[group_id].clear()
-                    self.batch_timer[group_id] = time.time()
-                    
-                    await self._process_batch_tasks(group_id, tasks_to_process)
-                
-                # 标记任务完成
-                self.detection_queue.task_done()
+                if not timeout_occurred:
+                    # 正常获取到任务
+                    group_id, user_id, user_name, message_content, timestamp, event = detection_task
+                    # 初始化群聊的批量缓冲区
+                    if group_id not in self.batch_buffer:
+                        self.batch_buffer[group_id] = []
+                        self.batch_timer[group_id] = time.time()
+                    # 添加任务到批量缓冲区
+                    self.batch_buffer[group_id].append(detection_task)
+                    # 标记任务完成
+                    self.detection_queue.task_done()
+
+                # 超时或新任务到达后，检查所有群聊的批量缓冲区
+                now = time.time()
+                # 获取最大字符长度配置
+                max_chars = int(self._get_config_value("BATCH_MAX_TEXT_LENGTH", 5000))
+                for gid, tasks in list(self.batch_buffer.items()):
+                    if not tasks:
+                        continue
+                    # 计算文本总字符数（图片内容视为0字符）
+                    total_chars = sum(len(task[3] or "") for task in tasks)
+                    # 达到批量大小、超时或字符数超限时触发处理
+                    if len(tasks) >= batch_size or now - self.batch_timer[gid] > batch_wait_time or total_chars > max_chars:
+                        # 速率限制：确保距离上次调用至少 rate_limit 秒
+                        time_since_last_call = now - self.last_model_call_time
+                        if time_since_last_call < rate_limit:
+                            await asyncio.sleep(rate_limit - time_since_last_call)
+                        # 更新最后调用时间
+                        self.last_model_call_time = time.time()
+                        # 准备处理批量任务
+                        tasks_to_process = tasks.copy()
+                        self.batch_buffer[gid].clear()
+                        self.batch_timer[gid] = time.time()
+                        await self._process_batch_tasks(gid, tasks_to_process)
                 
             except asyncio.CancelledError:
                 logger.info("推销检测队列处理器被取消")
@@ -109,46 +109,13 @@ class SpamDetectorPlugin(Star):
     
     async def _process_batch_tasks(self, group_id: str, tasks: List[tuple]):
         """批量处理同一群聊的检测任务"""
+        # 如果没有任务则直接返回
+        if not tasks:
+            return
+        logger.info(f"开始批量处理群聊 {group_id} 的 {len(tasks)} 条消息")
         try:
-            # 获取批量处理配置
-            max_batch_text_length = int(self._get_config_value("BATCH_MAX_TEXT_LENGTH", 2000))
-            batch_size = int(self._get_config_value("BATCH_PROCESS_SIZE", 3))
-            
-            logger.info(f"开始批量处理群聊 {group_id} 的 {len(tasks)} 条消息")
-            
-            # 第一批：符合字数和数量限制的消息
-            main_batch_tasks = []
-            remaining_tasks = []
-            total_text_length = 0
-            
-            for task in tasks:
-                if len(main_batch_tasks) >= batch_size:
-                    remaining_tasks.extend(tasks[len(main_batch_tasks):])
-                    break
-                    
-                full_content = await self._build_full_content(task)
-                
-                # 检查是否超过字数限制
-                if total_text_length + len(full_content) > max_batch_text_length:
-                    # 如果第一条消息就超过限制，单独处理
-                    if len(main_batch_tasks) == 0:
-                        await self._process_single_task(task, group_id, "消息过长，单独处理")
-                        remaining_tasks.extend(tasks[1:])
-                    else:
-                        remaining_tasks.extend(tasks[len(main_batch_tasks):])
-                    break
-                
-                main_batch_tasks.append(task)
-                total_text_length += len(full_content)
-            
-            # 处理主批量
-            if main_batch_tasks:
-                await self._process_task_batch(main_batch_tasks, group_id, "主批量")
-            
-            # 处理剩余任务
-            if remaining_tasks:
-                await self._process_task_batch(remaining_tasks, group_id, "剩余任务")
-                
+            # 直接将所有任务作为一个批量处理
+            await self._process_task_batch(tasks, group_id, "主批量")
         except Exception as e:
             logger.error(f"批量处理任务时出错: {e}", exc_info=True)
             # 错误回退：逐条处理
@@ -208,24 +175,29 @@ class SpamDetectorPlugin(Star):
             
         logger.info(f"开始{batch_type}处理 {len(tasks)} 条消息")
         
-        # 构建批量输入
-        batch_input = {}
-        task_map = {}
+        # 构建批量输入（同一用户的多条消息合并）
+        batch_input: Dict[str, str] = {}
+        task_map: Dict[str, tuple] = {}
         users_to_lock = set()  # 需要加锁的用户
-        
+        num=0
         for task in tasks:
             user_id, user_name, message_content, timestamp, event = self._extract_task_info(task)
             user_lock = (group_id, user_id)
-            
-            # 检查用户是否已在处理中
+            # 跳过已在处理中的用户
             if user_lock in self.processing_users:
                 logger.info(f"用户 {user_name} ({user_id}) 已在处理中，跳过检测")
                 continue
-            
+            # 获取完整内容
             full_content = await self._build_full_content(task)
-            batch_input[user_id] = full_content
-            task_map[user_id] = task
+            # 合并同一用户的消息内容
+            if user_id in batch_input:
+                batch_input[user_id] += f"\n{full_content}"
+            else:
+                batch_input[user_id] = full_content
+                # 记录首次出现的任务用于后续处理
+                task_map[user_id] = task
             users_to_lock.add(user_lock)
+            num+=1
         
         if not batch_input:
             logger.info(f"{batch_type}处理完成：所有任务都被跳过或无效")
@@ -238,7 +210,7 @@ class SpamDetectorPlugin(Star):
         try:
             # 批量检测
             total_chars = sum(len(content) for content in batch_input.values())
-            logger.info(f"{batch_type}检测 {len(batch_input)} 条消息，总字符数: {total_chars}")
+            logger.info(f"{batch_type}检测 {num} 条消息，总字符数: {total_chars}")
             
             spam_user_ids = await self._batch_spam_detection(batch_input)
             
@@ -702,9 +674,9 @@ class SpamDetectorPlugin(Star):
             if not user_messages:
                 logger.warning(f"没有找到属于用户 {user_id} 的消息，跳过转发")
                 return
-            
+
             logger.info(f"准备转发 {len(user_messages)} 条属于用户 {user_id} 的消息到管理员群")
-                
+
             # 检查事件类型
             if not hasattr(event, 'bot'):
                 logger.warning("事件对象没有bot属性，无法使用合并转发")

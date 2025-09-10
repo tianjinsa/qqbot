@@ -30,10 +30,10 @@
     "hint": "检测到推销信息后禁言用户的时长，单位为秒。600秒=10分钟，3600秒=1小时"
   },
   "LAST_TIME": {
-    "description": "检测到推销后，回溯该用户消息的时间范围（分钟）",
+    "description": "保存用户消息的时间范围（分钟）",
     "type": "int",
     "default": 5,
-    "hint": "当检测到推销信息时，会收集该用户在这个时间范围内发送的所有消息一并转发给管理员"
+    "hint": "当检测到推销信息时，会收集该用户在这个时间范围内发送的所有消息一并转发给管理员，并撤回这些消息"
   },
   "TEXT_MODEL_ID": {
     "description": "文本模型ID",
@@ -133,16 +133,22 @@
     "hint": "控制AI模型调用的最小间隔时间，避免频繁调用。建议设置为0.5-2.0秒"
   },
   "BATCH_PROCESS_SIZE": {
-    "description": "批量处理大小",
+    "description": "缓冲区消息最大条数",
     "type": "int",
     "default": 3,
     "hint": "一次批量处理的最大消息数量，建议设置为3-10条"
   },
   "BATCH_MAX_TEXT_LENGTH": {
-    "description": "批量处理最大文本长度（字符数）",
+    "description": "缓冲区最大文本长度（字符数）",
     "type": "int",
-    "default": 10000,
+    "default": 5000,
     "hint": "批量处理时所有消息内容的最大总字符数，超出此限制的消息将单独处理"
+  },
+  "BATCH_WAIT_TIME": {
+    "description": "缓冲区等待时间（秒）",
+    "type": "float",
+    "default": 5.0,
+    "hint": "批量处理时等待收集更多消息的时间，设置越大批量效率越高但响应延迟越大。建议设置为3.0-10.0秒"
   },
   "MAX_DETECTION_QUEUE_SIZE": {
     "description": "最大检测队列大小",
@@ -150,10 +156,10 @@
     "default": 180,
     "hint": "检测队列的最大容量，超出时会跳过新消息，避免内存占用过高。群聊消息过于频繁时建议调大此值"
   },
-  "MAX_RECURSIVE_MESSAGES": {
-    "description": "合并转发递归检查最大消息数",
+  "MAX_CONCURRENT_AI_CALLS": {
+    "description": "最大并发AI调用数",
     "type": "int",
-    "default": 16,
-    "hint": "递归检查合并转发消息时的最大消息数量限制，防止无限递归和内存占用过高"
+    "default": 2,
+    "hint": "同时进行的AI模型调用的最大数量，防止过多并发请求。建议设置为2-5"
   }
 }
