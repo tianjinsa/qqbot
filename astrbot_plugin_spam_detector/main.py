@@ -3,6 +3,10 @@ import time
 import base64
 import json
 import os
+import asyncio
+import time
+import json
+import base64
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from openai import AsyncOpenAI
@@ -10,7 +14,7 @@ from openai import AsyncOpenAI
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
-import astrbot.api.message_components as Comp
+from astrbot.api.message import Comp
 
 
 @register("astrbot_plugin_spam_detector", "AstrBot Dev Team", "智能防推销插件，使用AI检测并处理推销信息", "1.1.3", "https://github.com/AstrBotDevs/astrbot_plugin_spam_detector")
@@ -29,10 +33,18 @@ class SpamDetectorPlugin(Star):
         self.batch_timer = {}  # type: Dict[str, float]
         # 用户处理锁：防止同一用户被并发处理
         self.processing_users = set()  # 存储 (group_id, user_id)
+        # AI调用并发控制
+        self.ai_semaphore = None  # 在initialize中初始化
+        # 消息池锁，防止并发修改
+        self.message_pool_lock = asyncio.Lock()
         
     async def initialize(self):
         """插件初始化"""
         logger.info("防推销插件已启动")
+        # 初始化AI调用并发限制
+        max_concurrent_ai_calls = int(self._get_config_value("MAX_CONCURRENT_AI_CALLS", 3))
+        self.ai_semaphore = asyncio.Semaphore(max_concurrent_ai_calls)
+        logger.info(f"AI调用并发限制已设置为: {max_concurrent_ai_calls}")
         # 启动检测队列处理器
         asyncio.create_task(self._detection_worker())
         
@@ -46,10 +58,11 @@ class SpamDetectorPlugin(Star):
                 # 获取配置
                 batch_size = int(self._get_config_value("BATCH_PROCESS_SIZE", 3))
                 rate_limit = float(self._get_config_value("QUEUE_RATE_LIMIT", 1.0))
+                batch_wait_time = float(self._get_config_value("BATCH_WAIT_TIME", 5.0))
                 
                 # 等待队列中的检测任务
                 detection_task = await self.detection_queue.get()
-                group_id, user_id, user_name, message_content, timestamp, event, image_content = detection_task
+                group_id, user_id, user_name, message_content, timestamp, event = detection_task
                 
                 # 初始化群聊的批量缓冲区
                 if group_id not in self.batch_buffer:
@@ -62,7 +75,7 @@ class SpamDetectorPlugin(Star):
                 # 检查是否需要批量处理
                 should_process = (
                     len(self.batch_buffer[group_id]) >= batch_size or  # 达到批量大小
-                    time.time() - self.batch_timer[group_id] > 5.0  # 超过5秒等待时间
+                    time.time() - self.batch_timer[group_id] > batch_wait_time  # 超过设定的等待时间
                 )
                 
                 if should_process:
@@ -113,7 +126,7 @@ class SpamDetectorPlugin(Star):
                     remaining_tasks.extend(tasks[len(main_batch_tasks):])
                     break
                     
-                full_content = self._build_full_content(task)
+                full_content = await self._build_full_content(task)
                 
                 # 检查是否超过字数限制
                 if total_text_length + len(full_content) > max_batch_text_length:
@@ -146,12 +159,20 @@ class SpamDetectorPlugin(Star):
                 except Exception as single_e:
                     logger.error(f"单个任务处理失败: {single_e}", exc_info=True)
     
-    def _build_full_content(self, task: tuple) -> str:
-        """构建完整的消息内容（文本+图片）"""
-        _, user_id, user_name, message_content, timestamp, event, image_content = task
+    async def _build_full_content(self, task: tuple) -> str:
+        """构建完整的消息内容（文本+图片），在检测时提取图片内容"""
+        _, user_id, user_name, message_content, timestamp, event = task
         full_content = message_content
-        if image_content:
-            full_content += f"\n图片内容：{image_content}"
+        
+        # 在检测时提取图片内容，而不是在入队时
+        try:
+            image_content = await self._extract_image_content_from_event(event)
+            if image_content:
+                full_content += f"\n图片内容：{image_content}"
+                logger.debug(f"为用户 {user_id} 提取图片内容: {image_content[:100]}...")
+        except Exception as e:
+            logger.warning(f"提取用户 {user_id} 图片内容失败: {e}")
+        
         return full_content
     
     async def _extract_image_content_from_event(self, event: AstrMessageEvent) -> str:
@@ -175,35 +196,10 @@ class SpamDetectorPlugin(Star):
             logger.warning(f"从事件提取图片内容时出错: {e}")
             return ""
     
-    def _is_message_still_in_pool(self, group_id: str, user_id: str, message_id: str = None) -> bool:
-        """检查指定的消息是否仍在消息池中"""
-        try:
-            if group_id not in self.group_message_pools:
-                return False
-            
-            if user_id not in self.group_message_pools[group_id]:
-                return False
-            
-            user_messages = self.group_message_pools[group_id][user_id]
-            
-            # 如果指定了消息ID，检查特定消息
-            if message_id:
-                for msg_record in user_messages:
-                    if msg_record.get("message_id") == message_id:
-                        return True
-                return False
-            
-            # 如果没有指定消息ID，检查该用户是否还有消息
-            return len(user_messages) > 0
-            
-        except Exception as e:
-            logger.warning(f"检查消息是否在池中时出错: {e}")
-            return False
-    
     def _extract_task_info(self, task: tuple) -> tuple:
         """提取任务信息"""
-        _, user_id, user_name, message_content, timestamp, event, image_content = task
-        return user_id, user_name, message_content, timestamp, event, image_content
+        _, user_id, user_name, message_content, timestamp, event = task
+        return user_id, user_name, message_content, timestamp, event
     
     async def _process_task_batch(self, tasks: List[tuple], group_id: str, batch_type: str):
         """处理一批任务"""
@@ -212,34 +208,13 @@ class SpamDetectorPlugin(Star):
             
         logger.info(f"开始{batch_type}处理 {len(tasks)} 条消息")
         
-        # 在模型检测前，先过滤掉已经不在消息池中的消息
-        valid_tasks = []
-        skipped_count = 0
-        
-        for task in tasks:
-            user_id, user_name, message_content, timestamp, event, image_content = self._extract_task_info(task)
-            
-            # 检查消息是否仍在消息池中
-            if self._is_message_still_in_pool(group_id, user_id):
-                valid_tasks.append(task)
-            else:
-                skipped_count += 1
-                logger.info(f"跳过已从消息池中移除的用户 {user_id} 的消息检测")
-        
-        if skipped_count > 0:
-            logger.info(f"跳过了 {skipped_count} 个已不在消息池中的任务，剩余 {len(valid_tasks)} 个有效任务")
-        
-        if not valid_tasks:
-            logger.info(f"{batch_type}处理完成：所有任务都已无效，跳过检测")
-            return
-        
-        # 构建批量输入（只使用有效任务）
+        # 构建批量输入
         batch_input = {}
         task_map = {}
         users_to_lock = set()  # 需要加锁的用户
         
-        for task in valid_tasks:
-            user_id, user_name, message_content, timestamp, event, image_content = self._extract_task_info(task)
+        for task in tasks:
+            user_id, user_name, message_content, timestamp, event = self._extract_task_info(task)
             user_lock = (group_id, user_id)
             
             # 检查用户是否已在处理中
@@ -247,7 +222,7 @@ class SpamDetectorPlugin(Star):
                 logger.info(f"用户 {user_name} ({user_id}) 已在处理中，跳过检测")
                 continue
             
-            full_content = self._build_full_content(task)
+            full_content = await self._build_full_content(task)
             batch_input[user_id] = full_content
             task_map[user_id] = task
             users_to_lock.add(user_lock)
@@ -271,13 +246,8 @@ class SpamDetectorPlugin(Star):
             for user_id in spam_user_ids:
                 if user_id in task_map:
                     task = task_map[user_id]
-                    user_id, user_name, message_content, timestamp, event, image_content = self._extract_task_info(task)
-                    
-                    # 再次检查消息是否仍在消息池中（双重检查）
-                    if self._is_message_still_in_pool(group_id, user_id):
-                        await self._handle_spam_detection_result(user_id, user_name, group_id, event, batch_type)
-                    else:
-                        logger.info(f"检测到推销但用户 {user_id} 的消息已从池中移除，跳过处理")
+                    user_id, user_name, message_content, timestamp, event = self._extract_task_info(task)
+                    await self._handle_spam_detection_result(user_id, user_name, group_id, event, batch_type)
             
             logger.info(f"{batch_type}处理完成，发现 {len(spam_user_ids)} 个推销用户，分别是: {', '.join(spam_user_ids)}")
         finally:
@@ -287,7 +257,7 @@ class SpamDetectorPlugin(Star):
     
     async def _process_single_task(self, task: tuple, group_id: str, reason: str):
         """处理单个任务"""
-        user_id, user_name, message_content, timestamp, event, image_content = self._extract_task_info(task)
+        user_id, user_name, message_content, timestamp, event = self._extract_task_info(task)
         user_lock = (group_id, user_id)
         
         # 检查用户是否已在处理中
@@ -295,16 +265,11 @@ class SpamDetectorPlugin(Star):
             logger.info(f"用户 {user_name} ({user_id}) 已在处理中，跳过单个任务处理")
             return
         
-        # 在模型检测前检查消息是否仍在消息池中
-        if not self._is_message_still_in_pool(group_id, user_id):
-            logger.info(f"跳过已从消息池中移除的用户 {user_id} 的单个任务处理")
-            return
-        
         # 为用户加锁
         self.processing_users.add(user_lock)
         
         try:
-            full_content = self._build_full_content(task)
+            full_content = await self._build_full_content(task)
             
             logger.warning(f"{reason}: {full_content[:50]}... (用户: {user_name})")
             
@@ -313,11 +278,7 @@ class SpamDetectorPlugin(Star):
             spam_user_ids = await self._batch_spam_detection(single_batch_input)
             
             if user_id in spam_user_ids:
-                # 再次检查消息是否仍在消息池中（双重检查）
-                if self._is_message_still_in_pool(group_id, user_id):
-                    await self._handle_spam_detection_result(user_id, user_name, group_id, event, reason)
-                else:
-                    logger.info(f"检测到推销但用户 {user_id} 的消息已从池中移除，跳过单个任务处理")
+                await self._handle_spam_detection_result(user_id, user_name, group_id, event, reason)
         finally:
             # 确保处理完成后移除锁
             self.processing_users.discard(user_lock)
@@ -402,150 +363,152 @@ class SpamDetectorPlugin(Star):
         
     async def _call_text_model(self, messages: List[Dict], model_id: str = None) -> Optional[str]:
         """调用文本模型"""
-        try:
-            # 获取文本模型配置
-            if not model_id:
-                model_id = self._get_config_value("TEXT_MODEL_ID", "gpt-3.5-turbo")
-            base_url = self._get_config_value("TEXT_MODEL_BASE_URL", "https://api.openai.com/v1")
-            api_key = self._get_config_value("TEXT_MODEL_API_KEY", "")
-            timeout = self._get_config_value("MODEL_TIMEOUT", 30)
-            temperature = self._get_config_value("TEXT_MODEL_TEMPERATURE", 0.7)
-            thinking_enabled = self._get_config_value("TEXT_MODEL_THINKING_ENABLED", False)
-            
-            if not api_key:
-                logger.warning("文本模型API Key未配置")
-                return None
-            
-            logger.debug(f"调用文本模型: model_id={model_id}, base_url={base_url}, timeout={timeout}, temperature={temperature}, thinking_enabled={thinking_enabled}")
-            
-            # 调试信息：打印即将发送的消息
-            logger.debug(f"发送给模型的消息数量: {len(messages)}")
-            for i, msg in enumerate(messages):
-                logger.debug(f"消息 {i+1}: role={msg.get('role')}, content长度={len(str(msg.get('content', '')))}")
-            
-            # 创建OpenAI客户端
-            client = AsyncOpenAI(
-                api_key=api_key,
-                base_url=base_url,
-                timeout=timeout
-            )
-            
-            # 构建基础API调用参数
-            api_params = {
-                "model": model_id,
-                "messages": messages,
-                "temperature": temperature,
-                "max_tokens": 1000
-            }
-            
-            logger.debug(f"最终API参数: {', '.join(api_params.keys())}")
-            
-            # 调用文本模型
-            if thinking_enabled:
-                # 只使用extra_body方式传递thinking参数
-                try:
-                    logger.debug("使用extra_body方式启用thinking模式")
-                    response = await client.chat.completions.create(
-                        **api_params,
-                        extra_body={"thinking": {"type": "enabled"}}
-                    )
-                    logger.debug("成功使用extra_body方式启用thinking模式")
-                except Exception as e:
-                    logger.warning(f"extra_body thinking模式失败，回退到普通模式: {e}")
-                    response = await client.chat.completions.create(**api_params)
-            else:
-                response = await client.chat.completions.create(**api_params)
-            
-            if response.choices and len(response.choices) > 0:
-                logger.debug(f"文本模型调用成功，返回内容: {response.choices[0].message.content[:100]}...")
-                return response.choices[0].message.content
-            else:
-                logger.warning("文本模型返回空内容")
+        async with self.ai_semaphore:  # 并发控制
+            try:
+                # 获取文本模型配置
+                if not model_id:
+                    model_id = self._get_config_value("TEXT_MODEL_ID", "gpt-3.5-turbo")
+                base_url = self._get_config_value("TEXT_MODEL_BASE_URL", "https://api.openai.com/v1")
+                api_key = self._get_config_value("TEXT_MODEL_API_KEY", "")
+                timeout = self._get_config_value("MODEL_TIMEOUT", 30)
+                temperature = self._get_config_value("TEXT_MODEL_TEMPERATURE", 0.7)
+                thinking_enabled = self._get_config_value("TEXT_MODEL_THINKING_ENABLED", False)
                 
-        except Exception as e:
-            logger.error(f"文本模型调用失败: {e}", exc_info=True)
-        
-        return None
+                if not api_key:
+                    logger.warning("文本模型API Key未配置")
+                    return None
+                
+                logger.debug(f"调用文本模型: model_id={model_id}, base_url={base_url}, timeout={timeout}, temperature={temperature}, thinking_enabled={thinking_enabled}")
+                
+                # 调试信息：打印即将发送的消息
+                logger.debug(f"发送给模型的消息数量: {len(messages)}")
+                for i, msg in enumerate(messages):
+                    logger.debug(f"消息 {i+1}: role={msg.get('role')}, content长度={len(str(msg.get('content', '')))}")
+                
+                # 创建OpenAI客户端
+                client = AsyncOpenAI(
+                    api_key=api_key,
+                    base_url=base_url,
+                    timeout=timeout
+                )
+                
+                # 构建基础API调用参数
+                api_params = {
+                    "model": model_id,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": 1000
+                }
+                
+                logger.debug(f"最终API参数: {', '.join(api_params.keys())}")
+                
+                # 调用文本模型
+                if thinking_enabled:
+                    # 只使用extra_body方式传递thinking参数
+                    try:
+                        logger.debug("使用extra_body方式启用thinking模式")
+                        response = await client.chat.completions.create(
+                            **api_params,
+                            extra_body={"thinking": {"type": "enabled"}}
+                        )
+                        logger.debug("成功使用extra_body方式启用thinking模式")
+                    except Exception as e:
+                        logger.warning(f"extra_body thinking模式失败，回退到普通模式: {e}")
+                        response = await client.chat.completions.create(**api_params)
+                else:
+                    response = await client.chat.completions.create(**api_params)
+                
+                if response.choices and len(response.choices) > 0:
+                    logger.debug(f"文本模型调用成功，返回内容: {response.choices[0].message.content[:100]}...")
+                    return response.choices[0].message.content
+                else:
+                    logger.warning("文本模型返回空内容")
+                    
+            except Exception as e:
+                logger.error(f"文本模型调用失败: {e}", exc_info=True)
+            
+            return None
     
     async def _call_vision_model(self, messages: List[Dict], model_id: str = None) -> Optional[str]:
         """调用视觉模型"""
-        try:
-            # 获取视觉模型配置
-            if not model_id:
-                model_id = self._get_config_value("VISION_MODEL_ID", "gpt-4-vision-preview")
-            base_url = self._get_config_value("VISION_MODEL_BASE_URL", "https://api.openai.com/v1")
-            api_key = self._get_config_value("VISION_MODEL_API_KEY", "")
-            timeout = self._get_config_value("MODEL_TIMEOUT", 30)
-            temperature = self._get_config_value("VISION_MODEL_TEMPERATURE", 0.7)
-            thinking_enabled = self._get_config_value("VISION_MODEL_THINKING_ENABLED", False)
-            system_prompt = self._get_config_value("VISION_MODEL_SYSTEM_PROMPT", "提取图片上的内容，特别是文字")
-            
-            if not api_key:
-                logger.warning("视觉模型API Key未配置")
-                return None
-            
-            logger.debug(f"调用视觉模型: model_id={model_id}, base_url={base_url}, timeout={timeout}, temperature={temperature}, thinking_enabled={thinking_enabled}")
-            
-            # 调试信息：打印即将发送的消息
-            logger.debug(f"发送给视觉模型的消息数量: {len(messages)}")
-            for i, msg in enumerate(messages):
-                logger.debug(f"消息 {i+1}: role={msg.get('role')}, content类型={type(msg.get('content'))}")
-            
-            # 创建OpenAI客户端
-            client = AsyncOpenAI(
-                api_key=api_key,
-                base_url=base_url,
-                timeout=timeout
-            )
-            
-            # 确保有系统消息
-            final_messages = []
-            has_system = any(msg.get('role') == 'system' for msg in messages)
-            if not has_system:
-                final_messages.append({"role": "system", "content": system_prompt})
-            final_messages.extend(messages)
-            
-            # 构建基础API调用参数
-            api_params = {
-                "model": model_id,
-                "messages": final_messages,
-                "temperature": temperature,
-                "max_tokens": 1000
-            }
-            
-            logger.debug(f"最终API参数: {', '.join(api_params.keys())}")
-            
-            # 调用视觉模型
-            if thinking_enabled:
-                # 只使用extra_body方式传递thinking参数
-                try:
-                    logger.debug("使用extra_body方式启用thinking模式")
+        async with self.ai_semaphore:  # 并发控制
+            try:
+                # 获取视觉模型配置
+                if not model_id:
+                    model_id = self._get_config_value("VISION_MODEL_ID", "gpt-4-vision-preview")
+                base_url = self._get_config_value("VISION_MODEL_BASE_URL", "https://api.openai.com/v1")
+                api_key = self._get_config_value("VISION_MODEL_API_KEY", "")
+                timeout = self._get_config_value("MODEL_TIMEOUT", 30)
+                temperature = self._get_config_value("VISION_MODEL_TEMPERATURE", 0.7)
+                thinking_enabled = self._get_config_value("VISION_MODEL_THINKING_ENABLED", False)
+                system_prompt = self._get_config_value("VISION_MODEL_SYSTEM_PROMPT", "提取图片上的内容，特别是文字")
+                
+                if not api_key:
+                    logger.warning("视觉模型API Key未配置")
+                    return None
+                
+                logger.debug(f"调用视觉模型: model_id={model_id}, base_url={base_url}, timeout={timeout}, temperature={temperature}, thinking_enabled={thinking_enabled}")
+                
+                # 调试信息：打印即将发送的消息
+                logger.debug(f"发送给视觉模型的消息数量: {len(messages)}")
+                for i, msg in enumerate(messages):
+                    logger.debug(f"消息 {i+1}: role={msg.get('role')}, content类型={type(msg.get('content'))}")
+                
+                # 创建OpenAI客户端
+                client = AsyncOpenAI(
+                    api_key=api_key,
+                    base_url=base_url,
+                    timeout=timeout
+                )
+                
+                # 确保有系统消息
+                final_messages = []
+                has_system = any(msg.get('role') == 'system' for msg in messages)
+                if not has_system:
+                    final_messages.append({"role": "system", "content": system_prompt})
+                final_messages.extend(messages)
+                
+                # 构建基础API调用参数
+                api_params = {
+                    "model": model_id,
+                    "messages": final_messages,
+                    "temperature": temperature,
+                    "max_tokens": 1000
+                }
+                
+                logger.debug(f"最终API参数: {', '.join(api_params.keys())}")
+                
+                # 调用视觉模型
+                if thinking_enabled:
+                    # 只使用extra_body方式传递thinking参数
+                    try:
+                        logger.debug("使用extra_body方式启用thinking模式")
+                        response = await client.chat.completions.create(
+                            **api_params,
+                            extra_body={"thinking": {"type": "enabled"}}
+                        )
+                        logger.debug("成功使用extra_body方式启用thinking模式")
+                    except Exception as e:
+                        logger.warning(f"extra_body thinking模式失败，回退到普通模式: {e}")
+                        response = await client.chat.completions.create(**api_params)
+                else:
+                    logger.debug("使用extra_body方式关闭thinking模式")
                     response = await client.chat.completions.create(
                         **api_params,
-                        extra_body={"thinking": {"type": "enabled"}}
+                        extra_body={"thinking": {"type": "disabled"}}
                     )
-                    logger.debug("成功使用extra_body方式启用thinking模式")
-                except Exception as e:
-                    logger.warning(f"extra_body thinking模式失败，回退到普通模式: {e}")
-                    response = await client.chat.completions.create(**api_params)
-            else:
-                logger.debug("使用extra_body方式关闭thinking模式")
-                response = await client.chat.completions.create(
-                    **api_params,
-                    extra_body={"thinking": {"type": "disabled"}}
-                )
-                logger.debug("成功使用extra_body方式关闭thinking模式")
+                    logger.debug("成功使用extra_body方式关闭thinking模式")
 
-            if response.choices and len(response.choices) > 0:
-                logger.debug(f"视觉模型调用成功，返回内容: {response.choices[0].message.content[:100]}...")
-                return response.choices[0].message.content
-            else:
-                logger.warning("视觉模型返回空内容")
-                
-        except Exception as e:
-            logger.error(f"视觉模型调用失败: {e}", exc_info=True)
-        
-        return None
+                if response.choices and len(response.choices) > 0:
+                    logger.debug(f"视觉模型调用成功，返回内容: {response.choices[0].message.content[:100]}...")
+                    return response.choices[0].message.content
+                else:
+                    logger.warning("视觉模型返回空内容")
+                    
+            except Exception as e:
+                logger.error(f"视觉模型调用失败: {e}", exc_info=True)
+            
+            return None
         
     def _get_config_value(self, key: str, default: Any = None) -> Any:
         """获取配置值，带默认值支持"""
@@ -578,6 +541,10 @@ class SpamDetectorPlugin(Star):
     def _add_message_to_pool(self, group_id: str, user_id: str, timestamp: float, 
                             message_id: str = "", original_messages = None):
         """将消息添加到对应群聊的消息池中（不存储消息内容，只存储原始组件）"""
+        # 确保参数类型正确
+        group_id = str(group_id)
+        user_id = str(user_id)
+        
         if group_id not in self.group_message_pools:
             self.group_message_pools[group_id] = {}
         
@@ -587,7 +554,7 @@ class SpamDetectorPlugin(Star):
         # 添加消息记录（不存储content，因为有原始组件提供）
         message_record = {
             "timestamp": timestamp,
-            "message_id": message_id,
+            "message_id": str(message_id) if message_id else "",
             "recalled": False,
             "original_messages": original_messages or []  # 存储原始消息组件用于转发
         }
@@ -628,13 +595,49 @@ class SpamDetectorPlugin(Star):
     
     def _get_user_messages_in_group(self, group_id: str, user_id: str) -> List[Dict[str, Any]]:
         """获取指定群聊中指定用户的所有消息"""
+        # 确保参数类型正确
+        group_id = str(group_id)
+        user_id = str(user_id)
+        
         if group_id not in self.group_message_pools:
+            logger.debug(f"群聊 {group_id} 不在消息池中")
             return []
         
         if user_id not in self.group_message_pools[group_id]:
+            logger.debug(f"用户 {user_id} 在群聊 {group_id} 中没有消息")
             return []
         
-        return self.group_message_pools[group_id][user_id].copy()
+        user_messages = self.group_message_pools[group_id][user_id].copy()
+        logger.debug(f"从群聊 {group_id} 用户 {user_id} 获取到 {len(user_messages)} 条消息")
+        return user_messages
+    
+    def _pop_user_messages_from_pool(self, group_id: str, user_id: str) -> List[Dict[str, Any]]:
+        """
+        原子地获取并移除指定用户在群聊中的所有消息记录。
+        这可以防止在处理期间，消息池被其他并发任务修改，从而保证操作的原子性。
+        返回一个包含用户消息记录的【数据快照】。
+        """
+        # 确保参数类型正确
+        group_id = str(group_id)
+        user_id = str(user_id)
+        
+        # 检查群聊和用户是否存在于消息池中
+        if group_id in self.group_message_pools and user_id in self.group_message_pools[group_id]:
+            # 使用 pop 方法。这是一个原子操作：如果键存在，它会移除该键并返回其值。
+            # 这就确保了一旦一个处理流程拿到了数据，其他流程就拿不到了。
+            user_messages = self.group_message_pools[group_id].pop(user_id, [])
+            logger.info(f"已从消息池中取出并隔离了用户 {user_id} 的 {len(user_messages)} 条消息进行处理。")
+            
+            # 清理空群聊：如果 pop 操作后该群聊没有任何用户记录了，就从池中删除该群聊
+            if not self.group_message_pools[group_id]:
+                self.group_message_pools.pop(group_id)
+                logger.debug(f"群聊 {group_id} 已从消息池中清理（无用户消息）")
+                
+            return user_messages
+        
+        # 如果用户或群聊一开始就不在池中，返回空列表
+        logger.debug(f"用户 {user_id} 在群聊 {group_id} 中没有消息记录")
+        return []
     
     def _remove_recalled_message(self, group_id: str, user_id: str, message_id: str):
         """从消息池中删除已撤回的消息"""
@@ -690,6 +693,17 @@ class SpamDetectorPlugin(Star):
             if not admin_chat_id:
                 logger.warning("管理员群聊ID未配置，无法转发消息")
                 return
+                
+            # 确保参数类型正确
+            group_id = str(group_id)
+            user_id = str(user_id)
+            admin_chat_id = str(admin_chat_id)
+            
+            if not user_messages:
+                logger.warning(f"没有找到属于用户 {user_id} 的消息，跳过转发")
+                return
+            
+            logger.info(f"准备转发 {len(user_messages)} 条属于用户 {user_id} 的消息到管理员群")
                 
             # 检查事件类型
             if not hasattr(event, 'bot'):
@@ -835,6 +849,15 @@ class SpamDetectorPlugin(Star):
                                    user_name: str, user_messages: List[Dict], event: AstrMessageEvent):
         """文本形式转发到管理员群（作为合并转发的备用方案）"""
         try:
+            # 确保参数类型正确
+            group_id = str(group_id)
+            user_id = str(user_id)
+            admin_chat_id = str(admin_chat_id)
+            
+            if not user_messages:
+                logger.warning(f"没有找到属于用户 {user_id} 的消息，跳过文本转发")
+                return
+            
             group_name = await self._get_group_name(event, group_id)
             
             # 构建转发内容
@@ -862,7 +885,7 @@ class SpamDetectorPlugin(Star):
                 client = event.bot
                 ret = await client.api.call_action(
                     'send_group_msg',
-                    group_id=str(admin_chat_id),
+                    group_id=admin_chat_id,
                     message=forward_content
                 )
                 logger.info(f"文本转发结果: {ret}")
@@ -958,64 +981,62 @@ class SpamDetectorPlugin(Star):
             return ""
     
     async def _handle_spam_message_new(self, event: AstrMessageEvent, group_id: str, user_id: str, user_name: str) -> Optional[Comp.BaseMessageComponent]:
-        """处理检测到的推销消息 - 新的逻辑流程"""
+        """处理检测到的推销消息 - 新的、并发安全的逻辑流程"""
         try:
             logger.info(f"开始处理推销消息，用户: {user_name} ({user_id})，群聊: {group_id}")
             
-            # 0. 清理检测队列中同一群聊同一用户的重复任务
-            logger.info(f"步骤0: 清理检测队列中的重复任务")
+            # 步骤 0: 清理检测队列中的重复任务 (此逻辑保留)
             self._clear_user_detection_queue(group_id, user_id)
             
-            # 1. 先禁言用户
-            mute_duration = self._get_config_value("MUTE_DURATION", 600)  # 默认10分钟
-            logger.info(f"步骤1: 禁言用户 {user_id}，时长: {mute_duration} 秒")
+            # 步骤 1: 【核心修改】原子地从消息池获取并移除该用户的所有消息，形成数据快照
+            # 这一步是实现并发安全的关键。
+            user_messages_snapshot = self._pop_user_messages_from_pool(group_id, user_id)
+            
+            # 如果快照为空，说明消息已被其他并发任务处理，或已过期被清理。立即终止。
+            if not user_messages_snapshot:
+                logger.warning(f"处理用户 {user_id} 时，其消息已不在池中。可能已被其他任务处理或已过期。终止当前处理流程。")
+                return None # 必须返回，防止重复操作
+
+            logger.info(f"步骤1: 已隔离用户 {user_id} 的 {len(user_messages_snapshot)} 条消息作为处理快照。")
+
+            # 步骤 2: 禁言用户
+            mute_duration = self._get_config_value("MUTE_DURATION", 600)
+            logger.info(f"步骤2: 禁言用户 {user_id}，时长: {mute_duration} 秒")
             await self._try_mute_user(event, user_id, mute_duration)
             
-            # 2. 从消息池中获取该用户的所有消息
-            user_messages = self._get_user_messages_in_group(group_id, user_id)
-            logger.info(f"步骤2: 从消息池获取到用户 {user_id} 的 {len(user_messages)} 条消息")
-            
-            # 3. 先进行合并转发到管理员群（在撤回之前）
+            # 步骤 3: 进行合并转发。现在基于隔离的、绝对安全的【数据快照】进行。
             admin_chat_id = self._get_config_value("ADMIN_CHAT_ID", "")
-            if admin_chat_id and user_messages:
+            if admin_chat_id:
                 logger.info(f"步骤3: 合并转发推销消息到管理员群: {admin_chat_id}")
-                await self._forward_messages_as_merged(admin_chat_id, group_id, user_id, user_name, user_messages, event)
-            elif not admin_chat_id:
-                logger.warning("步骤3: 管理员群聊ID未配置，跳过转发")
+                # 传入的是我们刚刚隔离的、安全的 user_messages_snapshot 局部变量
+                await self._forward_messages_as_merged(admin_chat_id, group_id, user_id, user_name, user_messages_snapshot, event)
             else:
-                logger.warning("步骤3: 没有消息可转发")
-            
-            # 4. 执行消息撤回
+                logger.warning("步骤3: 管理员群聊ID未配置，跳过转发")
+
+            # 步骤 4: 执行消息撤回，同样基于安全的【数据快照】
             logger.info(f"步骤4: 开始撤回用户 {user_id} 的消息")
             recall_count = 0
-            for message_record in user_messages:
+            for message_record in user_messages_snapshot: # 遍历的是安全的快照
                 message_id = message_record.get("message_id")
-                if message_id and not message_record.get("recalled"):
+                if message_id:
                     try:
                         success = await self._try_recall_message_by_id(event, message_id)
                         if success:
-                            # 从消息池中删除撤回的消息
-                            self._remove_recalled_message(group_id, user_id, message_id)
                             recall_count += 1
-                            logger.debug(f"成功撤回消息 {message_id}")
-                        await asyncio.sleep(0.1)  # 避免频繁调用API
+                        await asyncio.sleep(0.1)  # 保留API调用间隔
                     except Exception as e:
                         logger.debug(f"撤回消息 {message_id} 失败: {e}")
                         continue
             
-            logger.info(f"步骤4完成: 已撤回 {recall_count} 条消息")
+            logger.info(f"步骤4完成: 共撤回 {recall_count} 条消息")
             
-            # 5. 清理过期消息
-            current_time = time.time()
-            logger.info(f"步骤5: 清理群聊 {group_id} 的过期消息")
-            self._cleanup_expired_messages(group_id, current_time)
+            # 步骤 5: 原有的清理逻辑可以移除，因为 _pop_user_messages_from_pool 已经隐式地完成了清理。
             
-            # 6. 发送警告消息
+            # 步骤 6: 发送最终的群内警告消息
             alert_message = self._get_config_value("SPAM_ALERT_MESSAGE",
                 "⚠️ 检测到疑似推销信息，相关消息已被处理，用户已被禁言。")
             logger.info(f"步骤6: 发送警告消息")
             
-            # 返回警告消息结果
             return event.plain_result(alert_message)
             
         except Exception as e:
@@ -1220,9 +1241,11 @@ class SpamDetectorPlugin(Star):
             else:
                 msg_id = getattr(event.message_obj, 'message_id', '')
             
-            # 将消息添加到对应群聊的消息池（不存储消息内容）
-            self._add_message_to_pool(group_id, user_id, timestamp, str(msg_id) if msg_id else "", event.get_messages())
-            logger.debug(f"已将消息添加到群聊 {group_id} 用户 {user_id} 的消息池")
+            # 使用异步锁保护消息池访问
+            async with self.message_pool_lock:
+                # 将消息添加到对应群聊的消息池（不存储消息内容）
+                self._add_message_to_pool(group_id, user_id, timestamp, str(msg_id) if msg_id else "", event.get_messages())
+                logger.debug(f"已将消息添加到群聊 {group_id} 用户 {user_id} 的消息池")
             
             # 检查消息类型是否需要处理（只处理文本、图片和合并转发）
             if not self._should_process_message_type(event):
@@ -1235,14 +1258,10 @@ class SpamDetectorPlugin(Star):
                 logger.warning(f"检测队列已满 ({self.detection_queue.qsize()})，跳过当前消息")
                 return
             
-            # 提取图片内容
-            image_content = await self._extract_image_content_from_event(event)
-            if image_content:
-                logger.info(f"图片内容提取成功: {image_content[:100]}...")
-            
-            # 将检测任务加入队列：(群聊ID, 用户ID, 用户名, 消息内容, 发送时间, 事件对象, 图片内容)
+            # 将检测任务加入队列：(群聊ID, 用户ID, 用户名, 消息内容, 发送时间, 事件对象)
+            # 注意：图片内容将在检测时提取，而不是在入队时提取，以提高入队速度
             logger.debug(f"将消息加入检测队列: {message_content[:50]}...")
-            detection_task = (group_id, user_id, user_name, message_content, timestamp, event, image_content)
+            detection_task = (group_id, user_id, user_name, message_content, timestamp, event)
             await self.detection_queue.put(detection_task)
             logger.debug(f"消息已加入队列，当前队列大小: {self.detection_queue.qsize()}")
                 
@@ -1301,6 +1320,12 @@ class SpamDetectorPlugin(Star):
             vision_model_api_key = self._get_config_value("VISION_MODEL_API_KEY", "")
             config_status.append(f"视觉模型API Key: {'已配置' if vision_model_api_key else '❌ 未配置'}")
             
+            # 检查批量处理配置
+            batch_size = self._get_config_value("BATCH_PROCESS_SIZE", 3)
+            batch_wait_time = self._get_config_value("BATCH_WAIT_TIME", 5.0)
+            max_concurrent_ai = self._get_config_value("MAX_CONCURRENT_AI_CALLS", 3)
+            config_status.append(f"批量处理配置: 批量大小={batch_size}, 等待时间={batch_wait_time}秒, AI并发限制={max_concurrent_ai}")
+            
             # 检查当前群聊状态
             current_group = event.get_group_id()
             if current_group:
@@ -1316,6 +1341,7 @@ class SpamDetectorPlugin(Star):
             )
             config_status.append(f"消息池: {total_groups} 个群聊, {total_users} 个用户, {total_messages} 条消息记录")
             config_status.append(f"检测队列: {self.detection_queue.qsize()} 个待处理任务")
+            config_status.append(f"正在处理的用户: {len(self.processing_users)} 个")
             
             debug_info = "🔧 推销插件调试信息:\n" + "\n".join(f"• {status}" for status in config_status)
             yield event.plain_result(debug_info)
@@ -1334,9 +1360,10 @@ class SpamDetectorPlugin(Star):
                 yield event.plain_result("❌ 管理员群聊ID未配置，无法测试转发功能")
                 return
             
-            # 模拟推销消息数据（新格式，不包含content字段）
+            # 模拟推销消息数据
             test_user_id = event.get_sender_id()
             test_user_name = event.get_sender_name()
+            current_group_id = event.get_group_id()
             test_messages = [
                 {
                     "timestamp": time.time() - 60,
@@ -1353,7 +1380,7 @@ class SpamDetectorPlugin(Star):
             ]
             
             logger.info(f"开始测试转发功能到群聊: {admin_chat_id}")
-            await self._forward_messages_as_merged(admin_chat_id, event.get_group_id(), test_user_id, test_user_name, test_messages, event)
+            await self._forward_messages_as_merged(admin_chat_id, current_group_id, test_user_id, test_user_name, test_messages, event)
             
             yield event.plain_result(f"✅ 转发测试完成，已发送到群聊: {admin_chat_id}")
             
