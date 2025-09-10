@@ -118,13 +118,6 @@ class SpamDetectorPlugin(Star):
             await self._process_task_batch(tasks, group_id, "主批量")
         except Exception as e:
             logger.error(f"批量处理任务时出错: {e}", exc_info=True)
-            # 错误回退：逐条处理
-            logger.info(f"尝试逐条批量处理 {len(tasks)} 条消息")
-            for task in tasks:
-                try:
-                    await self._process_single_task(task, group_id, "回退处理")
-                except Exception as single_e:
-                    logger.error(f"单个任务处理失败: {single_e}", exc_info=True)
     
     async def _build_full_content(self, task: tuple) -> str:
         """构建完整的消息内容（文本+图片），在检测时提取图片内容"""
@@ -226,34 +219,6 @@ class SpamDetectorPlugin(Star):
             # 确保处理完成后移除所有锁
             for user_lock in users_to_lock:
                 self.processing_users.discard(user_lock)
-    
-    async def _process_single_task(self, task: tuple, group_id: str, reason: str):
-        """处理单个任务"""
-        user_id, user_name, message_content, timestamp, event = self._extract_task_info(task)
-        user_lock = (group_id, user_id)
-        
-        # 检查用户是否已在处理中
-        if user_lock in self.processing_users:
-            logger.info(f"用户 {user_name} ({user_id}) 已在处理中，跳过单个任务处理")
-            return
-        
-        # 为用户加锁
-        self.processing_users.add(user_lock)
-        
-        try:
-            full_content = await self._build_full_content(task)
-            
-            logger.warning(f"{reason}: {full_content[:50]}... (用户: {user_name})")
-            
-            # 使用单条批量检测
-            single_batch_input = {user_id: full_content}
-            spam_user_ids = await self._batch_spam_detection(single_batch_input)
-            
-            if user_id in spam_user_ids:
-                await self._handle_spam_detection_result(user_id, user_name, group_id, event, reason)
-        finally:
-            # 确保处理完成后移除锁
-            self.processing_users.discard(user_lock)
     
     async def _handle_spam_detection_result(self, user_id: str, user_name: str, group_id: str, event, context: str):
         """处理推销检测结果"""
@@ -494,21 +459,21 @@ class SpamDetectorPlugin(Star):
             whitelist = [uid.strip() for uid in whitelist.split(",") if uid.strip()]
         return user_id in whitelist
     
-    def _is_group_whitelisted(self, group_id: str) -> bool:
-        """检查群聊是否在白名单中"""
+    def _is_group_blacklisted(self, group_id: str) -> bool:
+        """检查群聊是否在黑名单中"""
         if not group_id:
             return False
         
-        whitelist = self._get_config_value("WHITELIST_GROUPS", [])
-        if isinstance(whitelist, str):
+        blacklist = self._get_config_value("BLACKLIST_GROUPS", [])
+        if isinstance(blacklist, str):
             # 如果是字符串，按逗号分割
-            whitelist = [gid.strip() for gid in whitelist.split(",") if gid.strip()]
+            blacklist = [gid.strip() for gid in blacklist.split(",") if gid.strip()]
         
         # 如果白名单为空，则检测所有群聊
-        if not whitelist:
+        if not blacklist:
             return True
         
-        return group_id in whitelist
+        return group_id in blacklist
     
     def _add_message_to_pool(self, group_id: str, user_id: str, timestamp: float, 
                             message_id: str = "", original_messages = None):
@@ -1194,7 +1159,7 @@ class SpamDetectorPlugin(Star):
             logger.debug(f"收到群聊消息: 群聊 {group_id}, 用户 {user_id}, 内容: {message_content[:50]}...")
             
             # 群聊白名单检查
-            if not self._is_group_whitelisted(group_id):
+            if not self._is_group_blacklisted(group_id):
                 logger.debug(f"群聊 {group_id} 不在白名单中，跳过检测")
                 return
             logger.debug(f"群聊 {group_id} 在白名单中")
@@ -1279,8 +1244,8 @@ class SpamDetectorPlugin(Star):
             admin_chat_id = self._get_config_value("ADMIN_CHAT_ID", "")
             config_status.append(f"管理员群聊ID: {'已配置' if admin_chat_id else '❌ 未配置'} ({admin_chat_id})")
             
-            group_whitelist = self._get_config_value("WHITELIST_GROUPS", [])
-            config_status.append(f"群聊白名单: {len(group_whitelist)} 个群聊")
+            group_blacklist = self._get_config_value("BLACKLIST_GROUPS", [])
+            config_status.append(f"群聊白名单: {len(group_blacklist)} 个群聊")
             
             user_whitelist = self._get_config_value("WHITELIST_USERS", [])
             config_status.append(f"用户白名单: {len(user_whitelist)} 个用户")
@@ -1301,8 +1266,8 @@ class SpamDetectorPlugin(Star):
             # 检查当前群聊状态
             current_group = event.get_group_id()
             if current_group:
-                is_group_whitelisted = self._is_group_whitelisted(current_group)
-                config_status.append(f"当前群聊 {current_group}: {'✅ 在白名单中' if is_group_whitelisted else '❌ 不在白名单中'}")
+                is_group_blacklisted = self._is_group_blacklisted(current_group)
+                config_status.append(f"当前群聊 {current_group}: {'✅ 在白名单中' if is_group_blacklisted else '❌ 不在白名单中'}")
             
             # 检查消息池状态
             total_groups = len(self.group_message_pools)

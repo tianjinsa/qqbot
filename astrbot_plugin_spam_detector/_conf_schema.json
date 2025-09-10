@@ -11,8 +11,8 @@
     "default": [],
     "hint": "在此列表中的用户ID将不会被进行推销检测。可以逗号分隔输入多个用户ID，或使用管理命令添加"
   },
-  "WHITELIST_GROUPS": {
-    "description": "白名单群聊列表",
+  "BLACKLIST_GROUPS": {
+    "description": "黑名单群聊列表",
     "type": "list",
     "default": [],
     "hint": "只有在此列表中的群聊ID才会进行推销检测。如果为空则检测所有群聊。可以逗号分隔输入多个群聊ID"
@@ -21,7 +21,7 @@
     "description": "在原群聊发送的提示信息内容",
     "type": "text",
     "default": "⚠️ 检测到疑似推销信息，该消息已被处理，用户已被禁言。",
-    "hint": "当检测到推销信息后，在原群聊发送的警告消息"
+    "hint": "当检测到推销信息后，在原群聊发送的警告消息。为了避免打扰，可以设置为空字符串"
   },
   "MUTE_DURATION": {
     "description": "禁言时长（秒）",
