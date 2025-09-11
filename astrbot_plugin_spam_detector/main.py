@@ -16,7 +16,7 @@ from astrbot.api import logger, AstrBotConfig
 import astrbot.api.message_components as Comp
 
 
-@register("astrbot_plugin_spam_detector", "AstrBot Dev Team", "智能防推销插件，使用AI检测并处理推销信息", "1.2.0", "https://github.com/tianjinsa/qqbot/tree/main/astrbot_plugin_spam_detector")
+@register("astrbot_plugin_spam_detector", "AstrBot Dev Team", "智能防推销插件，使用AI检测并处理推销信息", "1.2.2", "https://github.com/tianjinsa/qqbot/tree/main/astrbot_plugin_spam_detector")
 class SpamDetectorPlugin(Star):
     def jsonout(self, data_to_serialize, log_prefix="JSON Output"): # 增加log_prefix参数，方便区分日志来源
         """
