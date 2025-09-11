@@ -168,7 +168,7 @@ class SpamDetectorPlugin(Star):
         logger.info(f"开始批量处理群聊 {group_id} 的 {len(tasks)} 条消息")
         try:
             # 直接将所有任务作为一个批量处理
-            await self._process_task_batch(tasks, group_id, "主批量")
+            await self._process_task_batch(tasks, group_id, "预批量")
         except Exception as e:
             logger.error(f"批量处理任务时出错: {e}", exc_info=True)
     
@@ -318,7 +318,7 @@ class SpamDetectorPlugin(Star):
                     # 确保返回的是字符串列表
                     spam_user_ids = [str(uid) for uid in spam_user_ids]
                     
-                    logger.info(f"批量推销检测模型返回结果: {spam_user_ids}")
+                    # logger.info(f"批量推销检测模型返回结果: {spam_user_ids}")
                     return spam_user_ids
                 except json.JSONDecodeError as e:
                     logger.warning(f"批量检测结果JSON解析失败: {e}, 原始结果: {result}")
@@ -389,8 +389,10 @@ class SpamDetectorPlugin(Star):
                     response = await client.chat.completions.create(**api_params)
                 
                 if response.choices and len(response.choices) > 0:
-                    logger.debug(f"文本模型调用成功，返回内容: {response.choices[0].message.content[:100]}...")
-                    return response.choices[0].message.content
+                    raw_content = response.choices[0].message.content
+                    cleaned_content = self._remove_thinking_tags(raw_content)
+                    logger.debug(f"文本模型调用成功，返回内容: {cleaned_content[:100]}...")
+                    return cleaned_content
                 else:
                     logger.warning("文本模型返回空内容")
                     
@@ -470,8 +472,10 @@ class SpamDetectorPlugin(Star):
                     logger.debug("成功使用extra_body方式关闭thinking模式")
 
                 if response.choices and len(response.choices) > 0:
-                    logger.debug(f"视觉模型调用成功，返回内容: {response.choices[0].message.content[:100]}...")
-                    return response.choices[0].message.content
+                    raw_content = response.choices[0].message.content
+                    cleaned_content = self._remove_thinking_tags(raw_content)
+                    logger.debug(f"视觉模型调用成功，返回内容: {cleaned_content[:100]}...")
+                    return cleaned_content
                 else:
                     logger.warning("视觉模型返回空内容")
                     
@@ -479,6 +483,29 @@ class SpamDetectorPlugin(Star):
                 logger.error(f"视觉模型调用失败: {e}", exc_info=True)
             
             return None
+    
+    def _remove_thinking_tags(self, content: str) -> str:
+        """
+        移除模型响应中的思考标签
+        
+        Args:
+            content: 原始模型响应内容
+            
+        Returns:
+            str: 去除思考标签后的内容
+        """
+        if not isinstance(content, str):
+            return content
+            
+        import re
+        # 使用正则表达式匹配并移除 <think>...</think> 标签及其内容
+        # 使用 re.DOTALL 标志使 . 能匹配换行符
+        cleaned_content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL | re.IGNORECASE)
+        
+        # 清理多余的空白字符
+        cleaned_content = re.sub(r'\n\s*\n', '\n', cleaned_content.strip())
+        
+        return cleaned_content
         
     def _get_config_value(self, key: str, default: Any = None) -> Any:
         """获取配置值，带默认值支持"""
@@ -596,7 +623,7 @@ class SpamDetectorPlugin(Star):
             # 使用 pop 方法。这是一个原子操作：如果键存在，它会移除该键并返回其值。
             # 这就确保了一旦一个处理流程拿到了数据，其他流程就拿不到了。
             user_messages = self.group_message_pools[group_id].pop(user_id, [])
-            logger.info(f"已从消息池中取出并隔离了用户 {user_id} 的 {len(user_messages)} 条消息进行处理。")
+            # logger.info(f"已从消息池中取出并隔离了用户 {user_id} 的 {len(user_messages)} 条消息进行处理。")
             
             # 清理空群聊：如果 pop 操作后该群聊没有任何用户记录了，就从池中删除该群聊
             if not self.group_message_pools[group_id]:
@@ -650,8 +677,8 @@ class SpamDetectorPlugin(Star):
             for task in tasks_to_keep:
                 self.detection_queue.put_nowait(task)
             
-            if cleared_count > 0:
-                logger.info(f"已从检测队列中清除 {cleared_count} 个重复任务 (群聊: {group_id}, 用户: {user_id})")
+            # if cleared_count > 0:
+                # logger.info(f"已从检测队列中清除 {cleared_count} 个重复任务 (群聊: {group_id}, 用户: {user_id})")
                 
         except Exception as e:
             logger.error(f"清理检测队列时出错: {e}", exc_info=True)
@@ -738,7 +765,7 @@ class SpamDetectorPlugin(Star):
                 return
             
             # 发送合并转发
-            logger.info(f"发送合并转发到管理员群 {admin_chat_id}，包含 {len(nodes)} 个节点")
+            # logger.info(f"发送合并转发到管理员群 {admin_chat_id}，包含 {len(nodes)} 个节点")
             
             # 直接发送合并转发，让底层自动处理所有消息格式
             platform_name = event.get_platform_name()
@@ -789,7 +816,7 @@ class SpamDetectorPlugin(Star):
                     group_id=str(admin_chat_id),
                     messages=forward_msg
                 )
-                logger.info(f"合并转发结果: {ret}")
+                # logger.info(f"合并转发结果: {ret}")
             else:
                 logger.warning(f"平台 {platform_name} 不支持合并转发")
                 await self._forward_to_admin_text(admin_chat_id, group_id, user_id, user_name, user_messages, event)
@@ -860,7 +887,7 @@ class SpamDetectorPlugin(Star):
                     group_id=admin_chat_id,
                     message=forward_content
                 )
-                logger.info(f"文本转发结果: {ret}")
+                # logger.info(f"文本转发结果: {ret}")
             
         except Exception as e:
             logger.error(f"文本转发失败: {e}", exc_info=True)
@@ -946,7 +973,7 @@ class SpamDetectorPlugin(Star):
             
             # 调用视觉模型
             result = await self._call_vision_model(messages)
-            logger.info(f"视觉模型返回结果: {result}..." if result else "视觉模型未返回结果")
+            # logger.info(f"视觉模型返回结果: {result}..." if result else "视觉模型未返回结果")
             return result or ""
             
         except Exception as e:
@@ -970,24 +997,24 @@ class SpamDetectorPlugin(Star):
                 logger.warning(f"处理用户 {user_id} 时，其消息已不在池中。可能已被其他任务处理或已过期。终止当前处理流程。")
                 return None # 必须返回，防止重复操作
 
-            logger.info(f"步骤1: 已隔离用户 {user_id} 的 {len(user_messages_snapshot)} 条消息作为处理快照。")
+            # logger.info(f"步骤1: 已隔离用户 {user_id} 的 {len(user_messages_snapshot)} 条消息作为处理快照。")
 
             # 步骤 2: 禁言用户
             mute_duration = self._get_config_value("MUTE_DURATION", 600)
-            logger.info(f"步骤2: 禁言用户 {user_id}，时长: {mute_duration} 秒")
+            # logger.info(f"步骤2: 禁言用户 {user_id}，时长: {mute_duration} 秒")
             await self._try_mute_user(event, user_id, mute_duration)
             
             # 步骤 3: 进行合并转发。现在基于隔离的、绝对安全的【数据快照】进行。
             admin_chat_id = self._get_config_value("ADMIN_CHAT_ID", "")
             if admin_chat_id:
-                logger.info(f"步骤3: 合并转发推销消息到管理员群: {admin_chat_id}")
+                # logger.info(f"步骤3: 合并转发推销消息到管理员群: {admin_chat_id}")
                 # 传入的是我们刚刚隔离的、安全的 user_messages_snapshot 局部变量
                 await self._forward_messages_as_merged(admin_chat_id, group_id, user_id, user_name, user_messages_snapshot, event)
             else:
                 logger.warning("步骤3: 管理员群聊ID未配置，跳过转发")
 
             # 步骤 4: 执行消息撤回，同样基于安全的【数据快照】
-            logger.info(f"步骤4: 开始撤回用户 {user_id} 的消息")
+            # logger.info(f"步骤4: 开始撤回用户 {user_id} 的消息")
             recall_count = 0
             for message_record in user_messages_snapshot: # 遍历的是安全的快照
                 message_id = message_record.get("message_id")
@@ -1001,14 +1028,14 @@ class SpamDetectorPlugin(Star):
                         logger.debug(f"撤回消息 {message_id} 失败: {e}")
                         continue
             
-            logger.info(f"步骤4完成: 共撤回 {recall_count} 条消息")
+            logger.info(f"步骤4完成: 共撤回用户 {user_id} 的 {recall_count} 条消息")
             
             # 步骤 5: 原有的清理逻辑可以移除，因为 _pop_user_messages_from_pool 已经隐式地完成了清理。
             
             # 步骤 6: 发送最终的群内警告消息
             alert_message = self._get_config_value("SPAM_ALERT_MESSAGE",
                 "⚠️ 检测到疑似推销信息，相关消息已被处理，用户已被禁言。")
-            logger.info(f"步骤6: 发送警告消息")
+            # logger.info(f"步骤6: 发送警告消息")
             
             return event.plain_result(alert_message)
             
@@ -1037,7 +1064,7 @@ class SpamDetectorPlugin(Star):
         """尝试禁言用户（如果平台支持）"""
         try:
             platform_name = event.get_platform_name()
-            logger.info(f"尝试禁言用户 {user_id}，时长: {duration}秒，平台: {platform_name}")
+            # logger.info(f"尝试禁言用户 {user_id}，时长: {duration}秒，平台: {platform_name}")
             
             if platform_name == "aiocqhttp" and hasattr(event, 'bot'):
                 client = event.bot
