@@ -1274,14 +1274,8 @@ class SpamDetectorPlugin(Star):
     async def on_group_message(self, event: AstrMessageEvent):
         """监听群聊消息"""
         try:
-            group_id = event.get_group_id()
-            user_id = event.get_sender_id()
-            user_name = event.get_sender_name()
-            message_content = event.message_str
-            timestamp = time.time()
-
             logger.debug(f"收到群聊消息: 群聊 {group_id}, 用户 {user_id}, 内容: {message_content[:50]}...")
-
+            
             # 群聊白名单检查
             if not self._is_group_blacklisted(group_id):
                 logger.debug(f"群聊 {group_id} 不在白名单中，跳过检测")
@@ -1293,9 +1287,19 @@ class SpamDetectorPlugin(Star):
                 logger.debug(f"用户 {user_id} 在白名单中，跳过检测")
                 return
             logger.debug(f"用户 {user_id} 不在白名单中")
-            
+
+            message_content = event.message_str
+
             # 检查消息类型是否需要处理（只处理文本、图片和合并转发）
+            if not self._should_process_message_type(event):
+                logger.debug(f"消息类型不需要处理，跳过检测: {message_content[:50]}...")
+                return
+                
+            group_id = event.get_group_id()
+            user_id = event.get_sender_id()
+            user_name = event.get_sender_name()
             
+            timestamp = time.time()
 
             # 获取消息ID
             raw_msg = getattr(event.message_obj, 'raw_message', {})
@@ -1318,7 +1322,7 @@ class SpamDetectorPlugin(Star):
                             # 在此处进行一次API请求获取完整结构
                             resp = await event.bot.api.call_action('get_forward_msg', message_id=str(msg_id))
                             nested_structure = resp.get('messages', [])
-                            self.jsonout(nested_structure, f"用户 {user_id} 的原始消息组件")
+                            # self.jsonout(nested_structure, "Forward Message Complete Structure")
                             
                             # 将完整结构传递给递归函数进行处理
                             nested_nodes = await self._process_forward_message_recursive(
@@ -1334,12 +1338,8 @@ class SpamDetectorPlugin(Star):
                     str(msg_id) if msg_id else "",
                     original_messages
                 )
-                self.jsonout(original_messages, f"用户 {user_id} 的消息组件")
                 logger.debug(f"已将消息组件及转发节点添加到群聊 {group_id} 用户 {user_id} 的消息池")
             
-            if not self._should_process_message_type(event):
-                logger.debug(f"消息类型不需要处理，跳过检测: {message_content[:50]}...")
-                return
             
             # 检查队列大小，避免积压过多
             max_queue_size = int(self._get_config_value("MAX_DETECTION_QUEUE_SIZE", 60))
