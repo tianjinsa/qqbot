@@ -12,7 +12,7 @@ outline: deep
 > - 需要有一定的 Python 基础。
 > - 需要有一定的 Git 使用经验。
 >
-> 欢迎加群 `975206796` 讨论！！
+> 欢迎添加 QQ 群: `975206796` 指点江山。
 
 ## 开发环境准备
 
@@ -33,7 +33,7 @@ outline: deep
 
 ### Clone 插件和 AstrBot 项目
 
-首先，Clone AstrBot 项目本体到本地。
+Clone AstrBot 项目本体和刚刚创建的插件仓库到本地。
 
 ```bash
 git clone https://github.com/AstrBotDevs/AstrBot
@@ -104,22 +104,6 @@ class MyPlugin(Star):
 > `Handler` 一定需要在插件类中注册，前两个参数必须为 `self` 和 `event`。如果文件行数过长，可以将服务写在外部，然后在 `Handler` 中调用。
 >
 > 插件类所在的文件名需要命名为 `main.py`。
-
-### API 文件结构
-
-所有的 API 都在 `astrbot/api` 目录下。
-
-```
-api
-├── __init__.py
-├── all.py # 无脑使用所有的结构
-├── event
-│   └── filter # 过滤器，事件钩子
-├── message_components.py # 消息段组建类型
-├── platform # 平台相关的结构
-├── provider # 大语言模型提供商相关的结构
-└── star
-```
 
 ### AstrMessageEvent
 
@@ -209,7 +193,7 @@ async def on_message(self, event: AstrMessageEvent):
 - 钉钉的图片仅支持 http 链接的图片。
 - 主动消息指的是机器人主动发送的消息。见下文: [发送消息](#发送消息)
 
-## 插件开发原则
+### 原则
 
 感谢您为 AstrBot 生态做出贡献，开发插件请遵守以下原则，这也是良好的编程习惯。
 
@@ -229,7 +213,7 @@ async def on_message(self, event: AstrMessageEvent):
 >
 > 代码处理函数可能会忽略插件类的定义，所有的处理函数都需写在插件类中。
 
-### 事件监听器
+### 消息事件的监听
 
 事件监听器可以收到平台下发的消息内容，可以实现指令、指令组、事件监听等功能。
 
@@ -239,7 +223,7 @@ async def on_message(self, event: AstrMessageEvent):
 from astrbot.api.event import filter, AstrMessageEvent
 ```
 
-#### 注册指令
+#### 指令
 
 ```python
 from astrbot.api.event import filter, AstrMessageEvent
@@ -261,7 +245,7 @@ class MyPlugin(Star):
 > [!TIP]
 > 指令不能带空格，否则 AstrBot 会将其解析到第二个参数。可以使用下面的指令组功能，或者也使用监听器自己解析消息内容。
 
-#### 注册带参数的指令
+#### 带参指令
 
 AstrBot 会自动帮你解析指令的参数。
 
@@ -276,7 +260,7 @@ def add(self, event: AstrMessageEvent, a: int, b: int):
     yield event.plain_result(f"结果是: {a + b}")
 ```
 
-#### 注册指令组
+#### 指令组
 
 指令组可以帮助你组织指令。
 
@@ -339,7 +323,7 @@ def calc_help(self, event: AstrMessageEvent):
     yield event.plain_result("这是一个计算器插件，拥有 add, sub 指令。")
 ```
 
-#### 指令和指令组别名(alias)
+#### 指令别名
 
 > v3.4.28 后
 
@@ -351,7 +335,19 @@ def help(self, event: AstrMessageEvent):
     yield event.plain_result("这是一个计算器插件，拥有 add, sub 指令。")
 ```
 
-#### 群/私聊事件监听器
+#### 事件类型过滤
+
+##### 接收所有
+
+这将接收所有的事件。
+
+```python
+@filter.event_message_type(filter.EventMessageType.ALL)
+async def on_all_message(self, event: AstrMessageEvent):
+    yield event.plain_result("收到了一条消息。")
+```
+
+##### 群聊和私聊
 
 ```python
 @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
@@ -362,17 +358,7 @@ async def on_private_message(self, event: AstrMessageEvent):
 
 `EventMessageType` 是一个 `Enum` 类型，包含了所有的事件类型。当前的事件类型有 `PRIVATE_MESSAGE` 和 `GROUP_MESSAGE`。
 
-#### 接收所有消息事件
-
-这将接收所有的事件。
-
-```python
-@filter.event_message_type(filter.EventMessageType.ALL)
-async def on_all_message(self, event: AstrMessageEvent):
-    yield event.plain_result("收到了一条消息。")
-```
-
-#### 只接收某个消息平台的事件
+##### 消息平台
 
 ```python
 @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP | filter.PlatformAdapterType.QQOFFICIAL)
@@ -383,7 +369,7 @@ async def on_aiocqhttp(self, event: AstrMessageEvent):
 
 当前版本下，`PlatformAdapterType` 有 `AIOCQHTTP`, `QQOFFICIAL`, `GEWECHAT`, `ALL`。
 
-### 限制管理员才能使用指令
+##### 管理员指令
 
 ```python
 @filter.permission_type(filter.PermissionType.ADMIN)
@@ -405,12 +391,12 @@ async def helloworld(self, event: AstrMessageEvent):
     yield event.plain_result("你好！")
 ```
 
-### 事件钩子【New】
+#### 事件钩子
 
 > [!TIP]
 > 事件钩子不支持与上面的 @filter.command, @filter.command_group, @filter.event_message_type, @filter.platform_adapter_type, @filter.permission_type 一起使用。
 
-#### AstrBot 初始化完成时
+##### Bot 初始化完成时
 
 > v3.4.34 后
 
@@ -423,7 +409,7 @@ async def on_astrbot_loaded(self):
 
 ```
 
-#### 收到 LLM 请求时
+##### LLM 请求时
 
 在 AstrBot 默认的执行流程中，在调用 LLM 前，会触发 `on_llm_request` 钩子。
 
@@ -444,7 +430,7 @@ async def my_custom_hook_1(self, event: AstrMessageEvent, req: ProviderRequest):
 
 > 这里不能使用 yield 来发送消息。如需发送，请直接使用 `event.send()` 方法。
 
-#### LLM 请求完成时
+##### LLM 请求完成时
 
 在 LLM 请求完成后，会触发 `on_llm_response` 钩子。
 
@@ -461,7 +447,7 @@ async def on_llm_resp(self, event: AstrMessageEvent, resp: LLMResponse): # 请�
 
 > 这里不能使用 yield 来发送消息。如需发送，请直接使用 `event.send()` 方法。
 
-#### 发送消息给消息平台适配器前
+##### 发送消息前
 
 在发送消息前，会触发 `on_decorating_result` 钩子。
 
@@ -480,7 +466,7 @@ async def on_decorating_result(self, event: AstrMessageEvent):
 
 > 这里不能使用 yield 来发送消息。这个钩子只是用来装饰 event.get_result().chain 的。如需发送，请直接使用 `event.send()` 方法。
 
-#### 发送消息给消息平台适配器后
+##### 发送消息后
 
 在发送消息给消息平台后，会触发 `after_message_sent` 钩子。
 
@@ -494,7 +480,7 @@ async def after_message_sent(self, event: AstrMessageEvent):
 
 > 这里不能使用 yield 来发送消息。如需发送，请直接使用 `event.send()` 方法。
 
-### 优先级
+#### 优先级
 
 > 大于等于 v3.4.21。
 
@@ -506,7 +492,330 @@ async def helloworld(self, event: AstrMessageEvent):
     yield event.plain_result("Hello!")
 ```
 
-### 会话控制 [NEW]
+### 消息的发送
+
+#### 被动消息
+
+被动消息指的是机器人被动回复消息。
+
+```python
+@filter.command("helloworld")
+async def helloworld(self, event: AstrMessageEvent):
+    yield event.plain_result("Hello!")
+    yield event.plain_result("你好！")
+
+    yield event.image_result("path/to/image.jpg") # 发送图片
+    yield event.image_result("https://example.com/image.jpg") # 发送 URL 图片，务必以 http 或 https 开头
+```
+
+#### 主动消息
+
+主动消息指的是机器人主动推送消息。某些平台可能不支持主动消息发送。
+
+如果是一些定时任务或者不想立即发送消息，可以使用 `event.unified_msg_origin` 得到一个字符串并将其存储，然后在想发送消息的时候使用 `self.context.send_message(unified_msg_origin, chains)` 来发送消息。
+
+```python
+from astrbot.api.event import MessageChain
+
+@filter.command("helloworld")
+async def helloworld(self, event: AstrMessageEvent):
+    umo = event.unified_msg_origin
+    message_chain = MessageChain().message("Hello!").file_image("path/to/image.jpg")
+    await self.context.send_message(event.unified_msg_origin, message_chain)
+```
+
+通过这个特性，你可以将 unified_msg_origin 存储起来，然后在需要的时候发送消息。
+
+> [!TIP]
+> 关于 unified_msg_origin。
+> unified_msg_origin 是一个字符串，记录了一个会话的唯一 ID，AstrBot 能够据此找到属于哪个消息平台的哪个会话。这样就能够实现在 `send_message` 的时候，发送消息到正确的会话。有关 MessageChain，请参见接下来的一节。
+
+#### 富媒体消息
+
+AstrBot 支持发送富媒体消息，比如图片、语音、视频等。使用 `MessageChain` 来构建消息。
+
+```python
+import astrbot.api.message_components as Comp
+
+@filter.command("helloworld")
+async def helloworld(self, event: AstrMessageEvent):
+    chain = [
+        Comp.At(qq=event.get_sender_id()), # At 消息发送者
+        Comp.Plain("来看这个图："),
+        Comp.Image.fromURL("https://example.com/image.jpg"), # 从 URL 发送图片
+        Comp.Image.fromFileSystem("path/to/image.jpg"), # 从本地文件目录发送图片
+        Comp.Plain("这是一个图片。")
+    ]
+    yield event.chain_result(chain)
+```
+
+上面构建了一个 `message chain`，也就是消息链，最终会发送一条包含了图片和文字的消息，并且保留顺序。
+
+类似地，
+
+**文件 File**
+
+```py
+Comp.File(file="path/to/file.txt", name="file.txt") # 部分平台不支持
+```
+
+**语音 Record**
+
+```py
+path = "path/to/record.wav" # 暂时只接受 wav 格式，其他格式请自行转换
+Comp.Record(file=path, url=path)
+```
+
+**视频 Video**
+
+```py
+path = "path/to/video.mp4"
+Comp.Video.fromFileSystem(path=path)
+Comp.Video.fromURL(url="https://example.com/video.mp4")
+```
+
+#### 发送群合并转发消息
+
+> 当前适配情况：aiocqhttp
+
+可以按照如下方式发送群合并转发消息。
+
+```py
+from astrbot.api.event import filter, AstrMessageEvent
+
+@filter.command("test")
+async def test(self, event: AstrMessageEvent):
+    from astrbot.api.message_components import Node, Plain, Image
+    node = Node(
+        uin=905617992,
+        name="Soulter",
+        content=[
+            Plain("hi"),
+            Image.fromFileSystem("test.jpg")
+        ]
+    )
+    yield event.chain_result([node])
+```
+
+![发送群合并转发消息](../../source/images/plugin/image-4.png)
+
+#### 发送视频消息
+
+> 当前适配情况：aiocqhttp
+
+```python
+from astrbot.api.event import filter, AstrMessageEvent
+
+@filter.command("test")
+async def test(self, event: AstrMessageEvent):
+    from astrbot.api.message_components import Video
+    # fromFileSystem 需要用户的协议端和机器人端处于一个系统中。
+    music = Video.fromFileSystem(
+        path="test.mp4"
+    )
+    # 更通用
+    music = Video.fromURL(
+        url="https://example.com/video.mp4"
+    )
+    yield event.chain_result([music])
+```
+
+![发送视频消息](../../source/images/plugin/db93a2bb-671c-4332-b8ba-9a91c35623c2.png)
+
+#### 发送 QQ 表情
+
+> 当前适配情况：仅 aiocqhttp
+
+QQ 表情 ID 参考：https://bot.q.qq.com/wiki/develop/api-v2/openapi/emoji/model.html#EmojiType
+
+```python
+from astrbot.api.event import filter, AstrMessageEvent
+
+@filter.command("test")
+async def test(self, event: AstrMessageEvent):
+    from astrbot.api.message_components import Face, Plain
+    yield event.chain_result([Face(id=21), Plain("你好呀")])
+```
+
+![发送 QQ 表情](../../source/images/plugin/image-5.png)
+
+
+### 控制事件传播
+
+```python{6}
+@filter.command("check_ok")
+async def check_ok(self, event: AstrMessageEvent):
+    ok = self.check() # 自己的逻辑
+    if not ok:
+        yield event.plain_result("检查失败")
+        event.stop_event() # 停止事件传播
+```
+
+当事件停止传播，后续所有步骤将不会被执行。
+
+假设有一个插件 A，A 终止事件传播之后所有后续操作都不会执行，比如执行其它插件的 handler、请求 LLM。
+
+### 插件配置
+
+> 大于等于 v3.4.15
+
+随着插件功能的增加，可能需要定义一些配置以让用户自定义插件的行为。
+
+AstrBot 提供了”强大“的配置解析和可视化功能。能够让用户在管理面板上直接配置插件，而不需要修改代码。
+
+![](../../source/images/plugin/QQ_1738149538737.png)
+
+**Schema 介绍**
+
+要注册配置，首先需要在您的插件目录下添加一个 `_conf_schema.json` 的 json 文件。
+
+文件内容是一个 `Schema`（模式），用于表示配置。Schema 是 json 格式的，例如上图的 Schema 是：
+
+```json
+{
+  "token": {
+    "description": "Bot Token",
+    "type": "string",
+    "hint": "测试醒目提醒",
+    "obvious_hint": true
+  },
+  "sub_config": {
+    "description": "测试嵌套配置",
+    "type": "object",
+    "hint": "xxxx",
+    "items": {
+      "name": {
+        "description": "testsub",
+        "type": "string",
+        "hint": "xxxx"
+      },
+      "id": {
+        "description": "testsub",
+        "type": "int",
+        "hint": "xxxx"
+      },
+      "time": {
+        "description": "testsub",
+        "type": "int",
+        "hint": "xxxx",
+        "default": 123
+      }
+    }
+  }
+}
+```
+
+- `type`: **此项必填**。配置的类型。支持 `string`, `text`, `int`, `float`, `bool`, `object`, `list`。当类型为 `text` 时，将会可视化为一个更大的可拖拽宽高的 textarea 组件，以适应大文本。
+- `description`: 可选。配置的描述。建议一句话描述配置的行为。
+- `hint`: 可选。配置的提示信息，表现在上图中右边的问号按钮，当鼠标悬浮在问号按钮上时显示。
+- `obvious_hint`: 可选。配置的 hint 是否醒目显示。如上图的 `token`。
+- `default`: 可选。配置的默认值。如果用户没有配置，将使用默认值。int 是 0，float 是 0.0，bool 是 False，string 是 ""，object 是 {}，list 是 []。
+- `items`: 可选。如果配置的类型是 `object`，需要添加 `items` 字段。`items` 的内容是这个配置项的子 Schema。理论上可以无限嵌套，但是不建议过多嵌套。
+- `invisible`: 可选。配置是否隐藏。默认是 `false`。如果设置为 `true`，则不会在管理面板上显示。
+- `options`: 可选。一个列表，如 `"options": ["chat", "agent", "workflow"]`。提供下拉列表可选项。
+- `editor_mode`: 可选。是否启用代码编辑器模式。需要 AstrBot >= `v3.5.10`, 低于这个版本不会报错，但不会生效。默认是 false。
+- `editor_language`: 可选。代码编辑器的代码语言，默认为 `json`。
+- `editor_theme`: 可选。代码编辑器的主题，可选值有 `vs-light`（默认）， `vs-dark`。
+- `_special`: 可选。用于调用 AstrBot 提供的可视化提供商选取、人格选取、知识库选取等功能，详见下文。
+
+其中，如果启用了代码编辑器，效果如下图所示:
+
+![editor_mode](../../source/images/plugin/image-6.png)
+
+![editor_mode_fullscreen](../../source/images/plugin/image-7.png)
+
+**_special** 字段仅 v4.0.0 之后可用。目前支持填写 `select_provider`, `select_provider_tts`, `select_provider_stt`, `select_persona`, `select_knowledgebase`，用于让用户快速选择用户在 WebUI 上已经配置好的模型提供商、人设、知识库等数据。结果均为字符串。以 select_provider 为例，将呈现以下效果:
+
+![](../source/images/plugin/image.png)
+
+**使用配置**
+
+AstrBot 在载入插件时会检测插件目录下是否有 `_conf_schema.json` 文件，如果有，会自动解析配置并保存在 `data/config/<plugin_name>_config.json` 下（依照 Schema 创建的配置文件实体），并在实例化插件类时传入给 `__init__()`。
+
+```py
+from astrbot.api import AstrBotConfig
+
+@register("config", "Soulter", "一个配置示例", "1.0.0")
+class ConfigPlugin(Star):
+    def __init__(self, context: Context, config: AstrBotConfig): # AstrBotConfig 继承自 Dict，拥有字典的所有方法
+        super().__init__(context)
+        self.config = config
+        print(self.config)
+
+        # 支持直接保存配置
+        # self.config.save_config() # 保存配置
+```
+
+**配置版本管理**
+
+如果您在发布不同版本时更新了 Schema，请注意，AstrBot 会递归检查 Schema 的配置项，如果发现配置文件中缺失了某个配置项，会自动添加默认值。但是 AstrBot 不会删除配置文件中**多余的**配置项，即使这个配置项在新的 Schema 中不存在（您在新的 Schema 中删除了这个配置项）。
+
+
+### 文转图
+
+#### 基本
+
+AstrBot 支持将文字渲染成图片。
+
+```python
+@filter.command("image") # 注册一个 /image 指令，接收 text 参数。
+async def on_aiocqhttp(self, event: AstrMessageEvent, text: str):
+    url = await self.text_to_image(text) # text_to_image() 是 Star 类的一个方法。
+    # path = await self.text_to_image(text, return_url = False) # 如果你想保存图片到本地
+    yield event.image_result(url)
+
+```
+
+![](../../source/images/plugin/image-3.png)
+
+#### 自定义(基于 HTML)
+
+如果你觉得上面渲染出来的图片不够美观，你可以使用自定义的 HTML 模板来渲染图片。
+
+AstrBot 支持使用 `HTML + Jinja2` 的方式来渲染文转图模板。
+
+```py{7}
+# 自定义的 Jinja2 模板，支持 CSS
+TMPL = '''
+<div style="font-size: 32px;">
+<h1 style="color: black">Todo List</h1>
+
+<ul>
+{% for item in items %}
+    <li>{{ item }}</li>
+{% endfor %}
+</div>
+'''
+
+@filter.command("todo")
+async def custom_t2i_tmpl(self, event: AstrMessageEvent):
+    options = {} # 可选择传入渲染选项。
+    url = await self.html_render(TMPL, {"items": ["吃饭", "睡觉", "玩原神"]}, options=options) # 第二个参数是 Jinja2 的渲染数据
+    yield event.image_result(url)
+```
+
+返回的结果:
+
+![](../../source/images/plugin/fcc2dcb472a91b12899f617477adc5c7.png)
+
+这只是一个简单的例子。得益于 HTML 和 DOM 渲染器的强大性，你可以进行更复杂和更美观的的设计。除此之外，Jinja2 支持循环、条件等语法以适应列表、字典等数据结构。你可以从网上了解更多关于 Jinja2 的知识。
+
+**图片渲染选项(options)**：
+
+请参考 Playwright 的 [screenshot](https://playwright.dev/python/docs/api/class-page#page-screenshot) API。
+
+- `timeout` (float, optional): 截图超时时间.
+- `type` (Literal["jpeg", "png"], optional): 截图图片类型.
+- `quality` (int, optional): 截图质量，仅适用于 JPEG 格式图片.
+- `omit_background` (bool, optional): 是否允许隐藏默认的白色背景，这样就可以截透明图了，仅适用于 PNG 格式
+- `full_page` (bool, optional): 是否截整个页面而不是仅设置的视口大小，默认为 True.
+- `clip` (dict, optional): 截图后裁切的区域。参考 Playwright screenshot API。
+- `animations`: (Literal["allow", "disabled"], optional): 是否允许播放 CSS 动画.
+- `caret`: (Literal["hide", "initial"], optional): 当设置为 hide 时，截图时将隐藏文本插入符号，默认为 hide.
+- `scale`: (Literal["css", "device"], optional): 页面缩放设置. 当设置为 css 时，则将设备分辨率与 CSS 中的像素一一对应，在高分屏上会使得截图变小. 当设置为 device 时，则根据设备的屏幕缩放设置或当前 Playwright 的 Page/Context 中的 device_scale_factor 参数来缩放.
+- `mask` (List["Locator"]], optional): 指定截图时的遮罩的 Locator。元素将被一颜色为 #FF00FF 的框覆盖.
+
+### 会话控制
 
 > 大于等于 v3.4.36
 
@@ -619,150 +928,571 @@ await empty_mention_waiter(event, session_filter=CustomFilter()) # 这里传入 
 
 甚至，可以使用这个特性来让群内组队！
 
-### 发送消息
 
-上面介绍的都是基于 `yield` 的方式，也就是异步生成器。这样的好处是可以在一个函数中多次发送消息。
 
-```python
-@filter.command("helloworld")
-async def helloworld(self, event: AstrMessageEvent):
-    yield event.plain_result("Hello!")
-    yield event.plain_result("你好！")
+### AI
 
-    yield event.image_result("path/to/image.jpg") # 发送图片
-    yield event.image_result("https://example.com/image.jpg") # 发送 URL 图片，务必以 http 或 https 开头
-```
+#### 通过提供商调用 LLM
 
-**主动消息**
+获取提供商有以下几种方式:
 
-如果是一些定时任务或者不想立即发送消息，可以使用 `event.unified_msg_origin` 得到一个字符串并将其存储，然后在想发送消息的时候使用 `self.context.send_message(unified_msg_origin, chains)` 来发送消息。
-
-```python
-from astrbot.api.event import MessageChain
-
-@filter.command("helloworld")
-async def helloworld(self, event: AstrMessageEvent):
-    umo = event.unified_msg_origin
-    message_chain = MessageChain().message("Hello!").file_image("path/to/image.jpg")
-    await self.context.send_message(event.unified_msg_origin, message_chain)
-```
-
-通过这个特性，你可以将 unified_msg_origin 存储起来，然后在需要的时候发送消息。
-
-> [!TIP]
-> 关于 unified_msg_origin。
-> unified_msg_origin 是一个字符串，记录了一个会话的唯一 ID，AstrBot 能够据此找到属于哪个消息平台的哪个会话。这样就能够实现在 `send_message` 的时候，发送消息到正确的会话。有关 MessageChain，请参见接下来的一节。
-
-### 发送图文等富媒体消息
-
-AstrBot 支持发送富媒体消息，比如图片、语音、视频等。使用 `MessageChain` 来构建消息。
-
-```python
-import astrbot.api.message_components as Comp
-
-@filter.command("helloworld")
-async def helloworld(self, event: AstrMessageEvent):
-    chain = [
-        Comp.At(qq=event.get_sender_id()), # At 消息发送者
-        Comp.Plain("来看这个图："),
-        Comp.Image.fromURL("https://example.com/image.jpg"), # 从 URL 发送图片
-        Comp.Image.fromFileSystem("path/to/image.jpg"), # 从本地文件目录发送图片
-        Comp.Plain("这是一个图片。")
-    ]
-    yield event.chain_result(chain)
-```
-
-上面构建了一个 `message chain`，也就是消息链，最终会发送一条包含了图片和文字的消息，并且保留顺序。
-
-类似地，
-
-**文件 File**
-
-```py
-Comp.File(file="path/to/file.txt", name="file.txt") # 部分平台不支持
-```
-
-**语音 Record**
-
-```py
-path = "path/to/record.wav" # 暂时只接受 wav 格式，其他格式请自行转换
-Comp.Record(file=path, url=path)
-```
-
-**视频 Video**
-
-```py
-path = "path/to/video.mp4"
-Comp.Video.fromFileSystem(path=path)
-Comp.Video.fromURL(url="https://example.com/video.mp4")
-```
-
-### 发送群合并转发消息
-
-> 当前适配情况：aiocqhttp
-
-可以按照如下方式发送群合并转发消息。
-
-```py
-from astrbot.api.event import filter, AstrMessageEvent
-
-@filter.command("test")
-async def test(self, event: AstrMessageEvent):
-    from astrbot.api.message_components import Node, Plain, Image
-    node = Node(
-        uin=905617992,
-        name="Soulter",
-        content=[
-            Plain("hi"),
-            Image.fromFileSystem("test.jpg")
-        ]
-    )
-    yield event.chain_result([node])
-```
-
-![发送群合并转发消息](../../source/images/plugin/image-4.png)
-
-### 发送视频消息
-
-> 当前适配情况：aiocqhttp
+- 获取当前使用的大语言模型提供商: `self.context.get_using_provider(umo=event.unified_msg_origin)`。
+- 根据 ID 获取大语言模型提供商: `self.context.get_provider_by_id(provider_id="xxxx")`。
+- 获取所有大语言模型提供商: `self.context.get_all_providers()`。
 
 ```python
 from astrbot.api.event import filter, AstrMessageEvent
 
 @filter.command("test")
 async def test(self, event: AstrMessageEvent):
-    from astrbot.api.message_components import Video
-    # fromFileSystem 需要用户的协议端和机器人端处于一个系统中。
-    music = Video.fromFileSystem(
-        path="test.mp4"
-    )
-    # 更通用
-    music = Video.fromURL(
-        url="https://example.com/video.mp4"
-    )
-    yield event.chain_result([music])
+    # func_tools_mgr = self.context.get_llm_tool_manager()
+    prov = self.context.get_using_provider(umo=event.unified_msg_origin)
+    if prov:
+        llm_resp = await provider.text_chat(
+            prompt="Hi!",
+            context=[
+                {"role": "user", "content": "balabala"},
+                {"role": "assistant", "content": "response balabala"}
+            ],
+            system_prompt="You are a helpful assistant."
+        )
+        print(llm_resp)
 ```
 
-![发送视频消息](../../source/images/plugin/db93a2bb-671c-4332-b8ba-9a91c35623c2.png)
+`Provider.text_chat()` 用于请求 LLM。其返回 `LLMResponse` 方法。除了上面的三个参数，其还支持:
 
-### 发送 QQ 表情
+- `func_tool`(ToolSet): 可选。用于传入函数工具。参考 [函数工具](#函数工具)。
+- `image_urls`(List[str]): 可选。用于传入请求中带有的图片 URL 列表。支持文件路径。
+- `model`(str): 可选。用于强制指定使用的模型。默认使用这个提供商默认配置的模型。
+- `tool_calls_result`(dict): 可选。用于传入工具调用的结果。
 
-> 当前适配情况：仅 aiocqhttp
 
-QQ 表情 ID 参考：https://bot.q.qq.com/wiki/develop/api-v2/openapi/emoji/model.html#EmojiType
+::: details LLMResponse 类型定义
+```py
 
-```python
-from astrbot.api.event import filter, AstrMessageEvent
+@dataclass
+class LLMResponse:
+    role: str
+    """角色, assistant, tool, err"""
+    result_chain: MessageChain = None
+    """返回的消息链"""
+    tools_call_args: List[Dict[str, any]] = field(default_factory=list)
+    """工具调用参数"""
+    tools_call_name: List[str] = field(default_factory=list)
+    """工具调用名称"""
+    tools_call_ids: List[str] = field(default_factory=list)
+    """工具调用 ID"""
 
-@filter.command("test")
-async def test(self, event: AstrMessageEvent):
-    from astrbot.api.message_components import Face, Plain
-    yield event.chain_result([Face(id=21), Plain("你好呀")])
+    raw_completion: ChatCompletion = None
+    _new_record: Dict[str, any] = None
+
+    _completion_text: str = ""
+
+    is_chunk: bool = False
+    """是否是流式输出的单个 Chunk"""
+
+    def __init__(
+        self,
+        role: str,
+        completion_text: str = "",
+        result_chain: MessageChain = None,
+        tools_call_args: List[Dict[str, any]] = None,
+        tools_call_name: List[str] = None,
+        tools_call_ids: List[str] = None,
+        raw_completion: ChatCompletion = None,
+        _new_record: Dict[str, any] = None,
+        is_chunk: bool = False,
+    ):
+        """初始化 LLMResponse
+
+        Args:
+            role (str): 角色, assistant, tool, err
+            completion_text (str, optional): 返回的结果文本，已经过时，推荐使用 result_chain. Defaults to "".
+            result_chain (MessageChain, optional): 返回的消息链. Defaults to None.
+            tools_call_args (List[Dict[str, any]], optional): 工具调用参数. Defaults to None.
+            tools_call_name (List[str], optional): 工具调用名称. Defaults to None.
+            raw_completion (ChatCompletion, optional): 原始响应, OpenAI 格式. Defaults to None.
+        """
+        if tools_call_args is None:
+            tools_call_args = []
+        if tools_call_name is None:
+            tools_call_name = []
+        if tools_call_ids is None:
+            tools_call_ids = []
+
+        self.role = role
+        self.completion_text = completion_text
+        self.result_chain = result_chain
+        self.tools_call_args = tools_call_args
+        self.tools_call_name = tools_call_name
+        self.tools_call_ids = tools_call_ids
+        self.raw_completion = raw_completion
+        self._new_record = _new_record
+        self.is_chunk = is_chunk
+
+    @property
+    def completion_text(self):
+        if self.result_chain:
+            return self.result_chain.get_plain_text()
+        return self._completion_text
+
+    @completion_text.setter
+    def completion_text(self, value):
+        if self.result_chain:
+            self.result_chain.chain = [
+                comp
+                for comp in self.result_chain.chain
+                if not isinstance(comp, Comp.Plain)
+            ]  # 清空 Plain 组件
+            self.result_chain.chain.insert(0, Comp.Plain(value))
+        else:
+            self._completion_text = value
+
+    def to_openai_tool_calls(self) -> List[Dict]:
+        """将工具调用信息转换为 OpenAI 格式"""
+        ret = []
+        for idx, tool_call_arg in enumerate(self.tools_call_args):
+            ret.append(
+                {
+                    "id": self.tools_call_ids[idx],
+                    "function": {
+                        "name": self.tools_call_name[idx],
+                        "arguments": json.dumps(tool_call_arg),
+                    },
+                    "type": "function",
+                }
+            )
+        return ret
+```
+:::
+
+#### 获取其他类型的提供商
+
+- 获取当前使用的语音识别提供商(STTProvider): `self.context.get_using_stt_provider(umo=event.unified_msg_origin)`。
+- 获取当前使用的语音合成提供商(TTSProvider): `self.context.get_using_tts_provider(umo=event.unified_msg_origin)`。
+- 获取当前使用的嵌入提供商(EmbeddingProvider): `self.context.get_using_embedding_provider(umo=event.unified_msg_origin)`。
+- 获取所有语音识别提供商: `self.context.get_all_stt_providers()`。
+- 获取所有语音合成提供商: `self.context.get_all_tts_providers()`。
+- 获取所有嵌入提供商: `self.context.get_all_embedding_providers()`。
+
+
+::: details STTProvider / TTSProvider / EmbeddingProvider 类型定义
+
+```py
+class TTSProvider(AbstractProvider):
+    def __init__(self, provider_config: dict, provider_settings: dict) -> None:
+        super().__init__(provider_config)
+        self.provider_config = provider_config
+        self.provider_settings = provider_settings
+
+    @abc.abstractmethod
+    async def get_audio(self, text: str) -> str:
+        """获取文本的音频，返回音频文件路径"""
+        raise NotImplementedError()
+
+
+class EmbeddingProvider(AbstractProvider):
+    def __init__(self, provider_config: dict, provider_settings: dict) -> None:
+        super().__init__(provider_config)
+        self.provider_config = provider_config
+        self.provider_settings = provider_settings
+
+    @abc.abstractmethod
+    async def get_embedding(self, text: str) -> list[float]:
+        """获取文本的向量"""
+        ...
+
+    @abc.abstractmethod
+    async def get_embeddings(self, text: list[str]) -> list[list[float]]:
+        """批量获取文本的向量"""
+        ...
+
+    @abc.abstractmethod
+    def get_dim(self) -> int:
+        """获取向量的维度"""
+        ...
+
+class STTProvider(AbstractProvider):
+    def __init__(self, provider_config: dict, provider_settings: dict) -> None:
+        super().__init__(provider_config)
+        self.provider_config = provider_config
+        self.provider_settings = provider_settings
+
+    @abc.abstractmethod
+    async def get_text(self, audio_url: str) -> str:
+        """获取音频的文本"""
+        raise NotImplementedError()
 ```
 
-![发送 QQ 表情](../../source/images/plugin/image-5.png)
+:::
 
-### 获取平台适配器/客户端
+#### 函数工具
+
+函数工具给了大语言模型调用外部工具的能力。在 AstrBot 中，函数工具有多种定义方式。
+
+##### 以类的形式
+
+这是最灵活的定义形式。
+
+```py
+from astrbot.api import ToolSet, FunctionTool
+from dataclasses import dataclass, field
+
+@dataclass
+class SearchTool(FunctionTool):
+    name: str = "get_current_weather" # tool 的名称
+    description: str = "Get the current weather in a given location." # tool 的描述
+    parameters: dict = field(default_factory=lambda: {
+        "type": "object",
+        "properties": {
+            "location": {
+                "type": "string",
+                "description": "The city and state, e.g. San Francisco, CA"
+            },
+            "unit": {
+                "type": "string",
+                "enum": ["celsius", "fahrenheit"]
+            }
+        },
+        "required": ["location"]
+    }) # tool 的参数定义
+
+    async def run(self, location: str, unit: str):
+        # Your implementation here
+        ...
+
+tool = SearchTool()
+tool_set = ToolSet([tool])
+
+```
+
+##### 以装饰器的形式
+
+这个形式定义的工具函数会被自动加载到 AstrBot Core 中，在 Core 请求大模型时会被自动带上。
+
+请务必按照以下格式编写一个工具（包括**函数注释**，AstrBot 会解析该函数注释，请务必将注释格式写对）
+
+```py{3,4,5,6,7}
+@filter.llm_tool(name="get_weather") # 如果 name 不填，将使用函数名
+async def get_weather(self, event: AstrMessageEvent, location: str) -> MessageEventResult:
+    '''获取天气信息。
+
+    Args:
+        location(string): 地点
+    '''
+    resp = self.get_weather_from_api(location)
+    yield event.plain_result("天气信息: " + resp)
+```
+
+在 `location(string): 地点` 中，`location` 是参数名，`string` 是参数类型，`地点` 是参数描述。
+
+支持的参数类型有 `string`, `number`, `object`, `boolean`。
+
+> [!NOTE]
+> 对于装饰器注册的 llm_tool，如果需要调用 Provider.text_chat()，func_tool（ToolSet 类型） 可以通过以下方式获取：
+> ```py
+> func_tool = self.context.get_llm_tool_manager() # 获取 AstrBot 的 LLM Tool Manager，包含了所有插件和 MCP 注册的 Tool
+> tool = func_tool.get_func("xxx")
+> if tool:
+>     tool_set = ToolSet()
+>     tool_set.add_tool(tool)
+> ```
+
+#### 对话管理器 ConversationManager
+
+**获取会话当前的 LLM 对话历史**
+
+```py
+from astrbot.core.conversation_mgr import Conversation
+
+uid = event.unified_msg_origin
+conv_mgr = self.context.conversation_manager
+curr_cid = await conv_mgr.get_curr_conversation_id(uid)
+conversation = await conv_mgr.get_conversation(uid, curr_cid)  # Conversation
+```
+
+
+::: details Conversation 类型定义
+```py
+@dataclass
+class Conversation:
+    """LLM 对话类
+
+    对于 WebChat，history 存储了包括指令、回复、图片等在内的所有消息。
+    对于其他平台的聊天，不存储非 LLM 的回复（因为考虑到已经存储在各自的平台上）。
+
+    在 v4.0.0 版本及之后，WebChat 的历史记录被迁移至 `PlatformMessageHistory` 表中，
+    """
+
+    platform_id: str
+    user_id: str
+    cid: str
+    """对话 ID, 是 uuid 格式的字符串"""
+    history: str = ""
+    """字符串格式的对话列表。"""
+    title: str | None = ""
+    persona_id: str | None = ""
+    """对话当前使用的人格 ID"""
+    created_at: int = 0
+    updated_at: int = 0
+```
+:::
+
+
+
+**所有方法**
+
+##### `new_conversation`
+- **Usage**  
+  在当前会话中新建一条对话，并自动切换为该对话。
+- **Arguments**  
+  - `unified_msg_origin: str` – 形如 `platform_name:message_type:session_id`  
+  - `platform_id: str | None` – 平台标识，默认从 `unified_msg_origin` 解析  
+  - `content: list[dict] | None` – 初始历史消息  
+  - `title: str | None` – 对话标题  
+  - `persona_id: str | None` – 绑定的 persona ID
+- **Returns**  
+  `str` – 新生成的 UUID 对话 ID
+
+##### `switch_conversation`
+- **Usage**  
+  将会话切换到指定的对话。
+- **Arguments**  
+  - `unified_msg_origin: str`  
+  - `conversation_id: str`
+- **Returns**  
+  `None`
+
+##### `delete_conversation`
+- **Usage**  
+  删除会话中的某条对话；若 `conversation_id` 为 `None`，则删除当前对话。
+- **Arguments**  
+  - `unified_msg_origin: str`  
+  - `conversation_id: str | None`
+- **Returns**  
+  `None`
+
+##### `get_curr_conversation_id`
+- **Usage**  
+  获取当前会话正在使用的对话 ID。
+- **Arguments**  
+  - `unified_msg_origin: str`
+- **Returns**  
+  `str | None` – 当前对话 ID，不存在时返回 `None`
+
+##### `get_conversation`
+- **Usage**  
+  获取指定对话的完整对象；若不存在且 `create_if_not_exists=True` 则自动创建。
+- **Arguments**  
+  - `unified_msg_origin: str`  
+  - `conversation_id: str`  
+  - `create_if_not_exists: bool = False`
+- **Returns**  
+  `Conversation | None`
+
+##### `get_conversations`
+- **Usage**  
+  拉取用户或平台下的全部对话列表。
+- **Arguments**  
+  - `unified_msg_origin: str | None` – 为 `None` 时不过滤用户  
+  - `platform_id: str | None`
+- **Returns**  
+  `List[Conversation]`
+
+##### `get_filtered_conversations`
+- **Usage**  
+  分页 + 关键词搜索对话。
+- **Arguments**  
+  - `page: int = 1`  
+  - `page_size: int = 20`  
+  - `platform_ids: list[str] | None`  
+  - `search_query: str = ""`  
+  - `**kwargs` – 透传其他过滤条件
+- **Returns**  
+  `tuple[list[Conversation], int]` – 对话列表与总数
+
+##### `update_conversation`
+- **Usage**  
+  更新对话的标题、历史记录或 persona_id。
+- **Arguments**  
+  - `unified_msg_origin: str`  
+  - `conversation_id: str | None` – 为 `None` 时使用当前对话  
+  - `history: list[dict] | None`  
+  - `title: str | None`  
+  - `persona_id: str | None`
+- **Returns**  
+  `None`
+
+##### `get_human_readable_context`
+- **Usage**  
+  生成分页后的人类可读对话上下文，方便展示或调试。
+- **Arguments**  
+  - `unified_msg_origin: str`  
+  - `conversation_id: str`  
+  - `page: int = 1`  
+  - `page_size: int = 10`
+- **Returns**  
+  `tuple[list[str], int]` – 当前页文本列表与总页数
+
+```py
+import json
+
+context = json.loads(conversation.history)
+```
+
+#### 人格设定管理器 PersonaManager
+
+`PersonaManager` 负责统一加载、缓存并提供所有人格（Persona）的增删改查接口，同时兼容 AstrBot 4.x 之前的旧版人格格式（v3）。  
+初始化时会自动从数据库读取全部人格，并生成一份 v3 兼容数据，供旧代码无缝使用。
+
+```py
+persona_mgr = self.context.persona_manager
+```
+
+##### `get_persona`
+
+- **Usage**
+  获取根据人格 ID 获取人格数据。
+- **Arguments**
+  - `persona_id: str` – 人格 ID
+- **Returns**
+  `Persona` – 人格数据，若不存在则返回 None
+- **Raises**
+  `ValueError` – 当不存在时抛出
+
+
+##### `get_all_personas`
+
+- **Usage**  
+  一次性获取数据库中所有人格。
+- **Returns**  
+  `list[Persona]` – 人格列表，可能为空
+
+
+##### `create_persona`
+
+- **Usage**  
+  新建人格并立即写入数据库，成功后自动刷新本地缓存。
+- **Arguments**  
+  - `persona_id: str` – 新人格 ID（唯一）  
+  - `system_prompt: str` – 系统提示词  
+  - `begin_dialogs: list[str]` – 可选，开场对话（偶数条，user/assistant 交替）  
+  - `tools: list[str]` – 可选，允许使用的工具列表；`None`=全部工具，`[]`=禁用全部
+- **Returns**  
+  `Persona` – 新建后的人格对象
+- **Raises**  
+  `ValueError` – 若 `persona_id` 已存在
+
+
+##### `update_persona`
+
+- **Usage**  
+  更新现有人格的任意字段，并同步到数据库与缓存。
+- **Arguments**  
+  - `persona_id: str` – 待更新的人格 ID  
+  - `system_prompt: str` – 可选，新的系统提示词  
+  - `begin_dialogs: list[str]` – 可选，新的开场对话  
+  - `tools: list[str]` – 可选，新的工具列表；语义同 `create_persona`
+- **Returns**  
+  `Persona` – 更新后的人格对象
+- **Raises**  
+  `ValueError` – 若 `persona_id` 不存在
+
+
+##### `delete_persona`
+
+- **Usage**  
+  删除指定人格，同时清理数据库与缓存。
+- **Arguments**  
+  - `persona_id: str` – 待删除的人格 ID
+- **Raises**  
+  `Valueable` – 若 `persona_id` 不存在
+
+
+##### `get_default_persona_v3`
+
+- **Usage**  
+  根据当前会话配置，获取应使用的默认人格（v3 格式）。  
+  若配置未指定或指定的人格不存在，则回退到 `DEFAULT_PERSONALITY`。
+- **Arguments**  
+  - `umo: str | MessageSession | None` – 会话标识，用于读取用户级配置
+- **Returns**  
+  `Personality` – v3 格式的默认人格对象
+
+
+::: details Persona / Personality 类型定义
+
+```py
+
+class Persona(SQLModel, table=True):
+    """Persona is a set of instructions for LLMs to follow.
+
+    It can be used to customize the behavior of LLMs.
+    """
+
+    __tablename__ = "personas"
+
+    id: int = Field(primary_key=True, sa_column_kwargs={"autoincrement": True})
+    persona_id: str = Field(max_length=255, nullable=False)
+    system_prompt: str = Field(sa_type=Text, nullable=False)
+    begin_dialogs: Optional[list] = Field(default=None, sa_type=JSON)
+    """a list of strings, each representing a dialog to start with"""
+    tools: Optional[list] = Field(default=None, sa_type=JSON)
+    """None means use ALL tools for default, empty list means no tools, otherwise a list of tool names."""
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column_kwargs={"onupdate": datetime.now(timezone.utc)},
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "persona_id",
+            name="uix_persona_id",
+        ),
+    )
+
+
+class Personality(TypedDict):
+    """LLM 人格类。
+
+    在 v4.0.0 版本及之后，推荐使用上面的 Persona 类。并且， mood_imitation_dialogs 字段已被废弃。
+    """
+
+    prompt: str
+    name: str
+    begin_dialogs: list[str]
+    mood_imitation_dialogs: list[str]
+    """情感模拟对话预设。在 v4.0.0 版本及之后，已被废弃。"""
+    tools: list[str] | None
+    """工具列表。None 表示使用所有工具，空列表表示不使用任何工具"""
+```
+
+:::
+
+
+### 其他
+
+#### 配置文件
+
+##### 默认配置文件
+
+```py
+config = self.context.get_config()
+```
+
+不建议修改默认配置文件，建议只读取。
+
+##### 会话配置文件
+
+v4.0.0 后，AstrBot 支持会话粒度的多配置文件。
+
+```py
+umo = event.unified_msg_origin
+config = self.context.get_config(umo=umo)
+```
+
+#### 获取消息平台实例
 
 > v3.4.34 后
 
@@ -777,7 +1507,7 @@ async def test_(self, event: AstrMessageEvent):
     # platform.get_client().api.call_action()
 ```
 
-### [aiocqhttp] 直接调用协议端 API
+#### 调用 QQ 协议端 API
 
 ```py
 @filter.command("helloworld")
@@ -800,303 +1530,16 @@ Napcat API 文档：https://napcat.apifox.cn/
 
 Lagrange API 文档：https://lagrange-onebot.apifox.cn/
 
-### [gewechat] 平台发送消息
 
-```py
-@filter.command("helloworld")
-async def helloworld(self, event: AstrMessageEvent):
-    if event.get_platform_name() == "gewechat":
-        from astrbot.core.platform.sources.gewechat.gewechat_platform_adapter import GewechatPlatformAdapter
-        assert isinstance(event, GewechatPlatformEvent)
-        client = event.client
-        to_wxid = self.message_obj.raw_message.get('to_wxid', None)
-        # await client.post_text()
-        # await client.post_image()
-        # await client.post_voice()
-```
 
-### 控制事件传播
-
-```python{6}
-@filter.command("check_ok")
-async def check_ok(self, event: AstrMessageEvent):
-    ok = self.check() # 自己的逻辑
-    if not ok:
-        yield event.plain_result("检查失败")
-        event.stop_event() # 停止事件传播
-```
-
-当事件停止传播，**后续所有步骤将不会被执行。**假设有一个插件 A，A 终止事件传播之后所有后续操作都不会执行，比如执行其它插件的 handler、请求 LLM。
-
-### 注册插件配置(beta)
-
-> 大于等于 v3.4.15
-
-随着插件功能的增加，可能需要定义一些配置以让用户自定义插件的行为。
-
-AstrBot 提供了”强大“的配置解析和可视化功能。能够让用户在管理面板上直接配置插件，而不需要修改代码。
-
-![](../../source/images/plugin/QQ_1738149538737.png)
-
-**Schema 介绍**
-
-要注册配置，首先需要在您的插件目录下添加一个 `_conf_schema.json` 的 json 文件。
-
-文件内容是一个 `Schema`（模式），用于表示配置。Schema 是 json 格式的，例如上图的 Schema 是：
-
-```json
-{
-  "token": {
-    "description": "Bot Token",
-    "type": "string",
-    "hint": "测试醒目提醒",
-    "obvious_hint": true
-  },
-  "sub_config": {
-    "description": "测试嵌套配置",
-    "type": "object",
-    "hint": "xxxx",
-    "items": {
-      "name": {
-        "description": "testsub",
-        "type": "string",
-        "hint": "xxxx"
-      },
-      "id": {
-        "description": "testsub",
-        "type": "int",
-        "hint": "xxxx"
-      },
-      "time": {
-        "description": "testsub",
-        "type": "int",
-        "hint": "xxxx",
-        "default": 123
-      }
-    }
-  }
-}
-```
-
-- `type`: **此项必填**。配置的类型。支持 `string`, `text`, `int`, `float`, `bool`, `object`, `list`。当类型为 `text` 时，将会可视化为一个更大的可拖拽宽高的 textarea 组件，以适应大文本。
-- `description`: 可选。配置的描述。建议一句话描述配置的行为。
-- `hint`: 可选。配置的提示信息，表现在上图中右边的问号按钮，当鼠标悬浮在问号按钮上时显示。
-- `obvious_hint`: 可选。配置的 hint 是否醒目显示。如上图的 `token`。
-- `default`: 可选。配置的默认值。如果用户没有配置，将使用默认值。int 是 0，float 是 0.0，bool 是 False，string 是 ""，object 是 {}，list 是 []。
-- `items`: 可选。如果配置的类型是 `object`，需要添加 `items` 字段。`items` 的内容是这个配置项的子 Schema。理论上可以无限嵌套，但是不建议过多嵌套。
-- `invisible`: 可选。配置是否隐藏。默认是 `false`。如果设置为 `true`，则不会在管理面板上显示。
-- `options`: 可选。一个列表，如 `"options": ["chat", "agent", "workflow"]`。提供下拉列表可选项。
-- `editor_mode`: 可选。是否启用代码编辑器模式。需要 AstrBot >= `v3.5.10`, 低于这个版本不会报错，但不会生效。默认是 false。
-- `editor_language`: 可选。代码编辑器的代码语言，默认为 `json`。
-- `editor_theme`: 可选。代码编辑器的主题，可选值有 `vs-light`（默认）， `vs-dark`。
-
-其中，如果启用了代码编辑器，效果如下图所示:
-
-![editor_mode](../../source/images/plugin/image-6.png)
-
-![editor_mode_fullscreen](../../source/images/plugin/image-7.png)
-
-**使用配置**
-
-AstrBot 在载入插件时会检测插件目录下是否有 `_conf_schema.json` 文件，如果有，会自动解析配置并保存在 `data/config/<plugin_name>_config.json` 下（依照 Schema 创建的配置文件实体），并在实例化插件类时传入给 `__init__()`。
-
-```py
-from astrbot.api import AstrBotConfig
-
-@register("config", "Soulter", "一个配置示例", "1.0.0")
-class ConfigPlugin(Star):
-    def __init__(self, context: Context, config: AstrBotConfig): # AstrBotConfig 继承自 Dict，拥有字典的所有方法
-        super().__init__(context)
-        self.config = config
-        print(self.config)
-
-        # 支持直接保存配置
-        # self.config.save_config() # 保存配置
-```
-
-**配置版本管理**
-
-如果您在发布不同版本时更新了 Schema，请注意，AstrBot 会递归检查 Schema 的配置项，如果发现配置文件中缺失了某个配置项，会自动添加默认值。但是 AstrBot 不会删除配置文件中**多余的**配置项，即使这个配置项在新的 Schema 中不存在（您在新的 Schema 中删除了这个配置项）。
-
-### 文字渲染成图片
-
-AstrBot 支持将文字渲染成图片。
-
-```python
-@filter.command("image") # 注册一个 /image 指令，接收 text 参数。
-async def on_aiocqhttp(self, event: AstrMessageEvent, text: str):
-    url = await self.text_to_image(text) # text_to_image() 是 Star 类的一个方法。
-    # path = await self.text_to_image(text, return_url = False) # 如果你想保存图片到本地
-    yield event.image_result(url)
-
-```
-
-![](../../source/images/plugin/image-3.png)
-
-### 自定义 HTML 渲染成图片
-
-如果你觉得上面渲染出来的图片不够美观，你可以使用自定义的 HTML 模板来渲染图片。
-
-AstrBot 支持使用 `HTML + Jinja2` 的方式来渲染文转图模板。
-
-```py{7,15}
-# 自定义的 Jinja2 模板，支持 CSS
-TMPL = '''
-<div style="font-size: 32px;">
-<h1 style="color: black">Todo List</h1>
-
-<ul>
-{% for item in items %}
-    <li>{{ item }}</li>
-{% endfor %}
-</div>
-'''
-
-@filter.command("todo")
-async def custom_t2i_tmpl(self, event: AstrMessageEvent):
-    url = await self.html_render(TMPL, {"items": ["吃饭", "睡觉", "玩原神"]}) # 第二个参数是 Jinja2 的渲染数据
-    yield event.image_result(url)
-```
-
-返回的结果:
-
-![](../../source/images/plugin/fcc2dcb472a91b12899f617477adc5c7.png)
-
-> 这只是一个简单的例子。得益于 HTML 和 DOM 渲染器的强大性，你可以进行更复杂和更美观的的设计。除此之外，Jinja2 支持循环、条件等语法以适应列表、字典等数据结构。你可以从网上了解更多关于 Jinja2 的知识。
-
-### 调用 LLM
-
-AstrBot 支持调用大语言模型。你可以通过 `self.context.get_using_provider()` 来获取当前使用的大语言模型提供商，但是需要启用大语言模型。
-
-```python
-from astrbot.api.event import filter, AstrMessageEvent
-
-@filter.command("test")
-async def test(self, event: AstrMessageEvent):
-    func_tools_mgr = self.context.get_llm_tool_manager()
-
-    # 获取用户当前与 LLM 的对话以获得上下文信息。
-    curr_cid = await self.context.conversation_manager.get_curr_conversation_id(event.unified_msg_origin) # 当前用户所处对话的对话id，是一个 uuid。
-    conversation = None # 对话对象
-    context = [] # 上下文列表
-    if curr_cid:
-        conversation = await self.context.conversation_manager.get_conversation(event.unified_msg_origin, curr_cid)
-        context = json.loads(conversation.history)
-    # 可以用这个方法自行为用户新建一个对话
-    # curr_cid = await self.context.conversation_manager.new_conversation(event.unified_msg_origin)
-
-    # 方法1. 最底层的调用 LLM 的方式, 如果启用了函数调用，不会进行产生任何副作用（不会调用函数工具,进行对话管理等），只是会回传所调用的函数名和参数
-    llm_response = await self.context.get_using_provider().text_chat(
-        prompt="你好",
-        session_id=None, # 此已经被废弃
-        contexts=[], # 也可以用上面获得的用户当前的对话记录 context
-        image_urls=[], # 图片链接，支持路径和网络链接
-        func_tool=func_tools_mgr, # 当前用户启用的函数调用工具。如果不需要，可以不传
-        system_prompt=""  # 系统提示，可以不传
-    )
-    # contexts 是历史记录。格式与 OpenAI 的上下文格式格式一致。即使用户正在使用 gemini，也会自动转换为 OpenAI 的上下文格式
-    # contexts = [
-    #     { "role": "system", "content": "你是一个助手。"},
-    #     { "role": "user", "content": "你好"}
-    # ]
-    # text_chat() 将会将 contexts 和 prompt,image_urls 合并起来形成一个上下文，然后调用 LLM 进行对话
-    if llm_response.role == "assistant":
-        print(llm_response.completion_text) # 回复的文本
-    elif llm_response.role == "tool":
-        print(llm_response.tools_call_name, llm_response.tools_call_args) # 调用的函数工具的函数名和参数
-    print(llm_response.raw_completion) # LLM 的原始响应，OpenAI 格式。其存储了包括 tokens 使用在内的所有信息。可能为 None，请注意处理
-
-    # 方法2. 以下方法将会经过 AstrBot 内部的 LLM 处理机制。会自动执行函数工具等。结果将会直接发给用户。
-    yield event.request_llm(
-        prompt="你好",
-        func_tool_manager=func_tools_mgr,
-        session_id=curr_cid, # 对话id。如果指定了对话id，将会记录对话到数据库
-        contexts=context, # 列表。如果不为空，将会使用此上下文与 LLM 对话。
-        system_prompt="",
-        image_urls=[], # 图片链接，支持路径和网络链接
-        conversation=conversation # 如果指定了对话，将会记录对话
-    )
-```
-
-### 注册一个 LLM 函数工具
-
-`function-calling` 给了大语言模型调用外部工具的能力。
-
-注册一个 `function-calling` 函数工具。
-
-请务必按照以下格式编写一个工具（包括**函数注释**，AstrBot 会尝试解析该函数注释）
-
-```py{3,4,5,6,7}
-@filter.llm_tool(name="get_weather") # 如果 name 不填，将使用函数名
-async def get_weather(self, event: AstrMessageEvent, location: str) -> MessageEventResult:
-    '''获取天气信息。
-
-    Args:
-        location(string): 地点
-    '''
-    resp = self.get_weather_from_api(location)
-    yield event.plain_result("天气信息: " + resp)
-```
-
-在 `location(string): 地点` 中，`location` 是参数名，`string` 是参数类型，`地点` 是参数描述。
-
-支持的参数类型有 `string`, `number`, `object`, `array`, `boolean`。
-
-> [!WARNING]
-> 请务必将注释格式写对！
-
-### 获取 AstrBot 配置
-
-```py
-config = self.context.get_config()
-# 使用方式类似 dict，如 config['provider']
-# config.save_config() 保存配置
-```
-
-### 获取当前载入的所有提供商
-
-```py
-providers = self.context.get_all_providers()
-providers_stt = self.context.get_all_stt_providers()
-providers_tts = self.context.get_all_tts_providers()
-```
-
-### 获取当前正在使用提供商
-
-```py
-provider = self.context.get_using_provider() # 没有使用时返回 None
-provider_stt = self.context.get_using_stt_provider() # 没有使用时返回 None
-provider_tts = self.context.get_using_tts_provider() # 没有使用时返回 None
-```
-
-### 通过提供商 ID 获取提供商
-
-```py
-self.context.get_provider_by_id(id_str)
-```
-
-### 获取当前载入的所有插件
+#### 载入的所有插件
 
 ```py
 plugins = self.context.get_all_stars() # 返回 StarMetadata 包含了插件类实例、配置等等
 ```
 
-### 获取函数调用管理器
 
-```py
-self.context.get_llm_tool_manager() # 返回 FuncCall
-
-# self.context.get_using_provider().text_chat(
-#     prompt="你好",
-#     session_id=None,
-#     contexts=[],
-#     image_urls=[],
-#     func_tool=self.context.get_llm_tool_manager(),
-#     system_prompt=""
-# )
-```
-
-### 注册一个异步任务
+#### 注册一个异步任务
 
 直接在 **init**() 中使用 `asyncio.create_task()` 即可。
 
@@ -1114,48 +1557,8 @@ class TaskPlugin(Star):
         print("Hello")
 ```
 
-### 获取载入的所有人格(Persona)
 
-```py
-from astrbot.api.provider import Personality
-personas = self.context.provider_manager.personas # List[Personality]
-```
-
-### 获取默认人格
-
-```py
-self.context.provider_manager.selected_default_persona["name"] # 默认的 persona_id
-```
-
-### 获取会话正在使用的对话
-
-```py
-from astrbot.core.conversation_mgr import Conversation
-uid = event.unified_msg_origin
-curr_cid = await self.context.conversation_manager.get_curr_conversation_id(uid)
-conversation = await self.context.conversation_manager.get_conversation(uid, curr_cid) # Conversation
-# context = json.loads(conversation.history) # 获取上下文
-# persona_id = conversation.persona_id # 获取对话使用的人格
-```
-
-> 目前当用户新建一个对话时，`persona_id` 是 None，当用户使用 `/persona unset` 显式取消人格时，`persona_id` 会置为 `[%None]` 字符串（这是为了防止与 `persona_id` 为 None 时使用默认人格 冲突）。
->
-> 可以使用如下方法获得默认人格 `id`
->
-> ```py
-> if not conversation.persona_id and not conversation.persona_id == "[%None]":
->     curr_persona_name = self.context.provider_manager.selected_default_persona["name"] # 默认的 persona_id
-> ```
-
-### 获取会话的所有对话
-
-```py
-from astrbot.core.conversation_mgr import Conversation
-uid = event.unified_msg_origin
-conversations = await self.context.conversation_manager.get_conversations(uid) # List[Conversation]
-```
-
-### 获取加载的所有平台
+#### 获取加载的所有平台
 
 ```py
 from astrbot.api.platform import Platform

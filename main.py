@@ -5,9 +5,6 @@ import json
 import os
 from datetime import datetime
 from typing import List, Dict, Any, Optional
-from pydantic import BaseModel
-
-from networkx import nodes
 from openai import AsyncOpenAI
 
 from astrbot.api.event import filter, AstrMessageEvent
@@ -18,56 +15,6 @@ import astrbot.api.message_components as Comp
 
 @register("astrbot_plugin_spam_detector", "AstrBot Dev Team", "智能防推销插件，使用AI检测并处理推销信息", "1.2.0", "https://github.com/tianjinsa/qqbot/tree/main/astrbot_plugin_spam_detector")
 class SpamDetectorPlugin(Star):
-    def jsonout(self, data_to_serialize, log_prefix="JSON Output"): # 增加log_prefix参数，方便区分日志来源
-        """
-        将给定的数据序列化为 JSON 格式并记录到日志中。
-        data_to_serialize: 可能是列表、Pydantic 模型或其他可序列化对象。
-        """
-        try:
-            processed_data = None
-            if isinstance(data_to_serialize, list):
-                # 如果是列表，遍历列表中的每个元素并尝试转换
-                serializable_list_items = []
-                for item in data_to_serialize:
-                    if isinstance(item, BaseModel): # 如果是 Pydantic 模型
-                        serializable_list_items.append(item.dict())
-                    elif hasattr(item, 'dict') and callable(item.dict): # 可能是类似Pydantic但不是其子类的对象
-                        serializable_list_items.append(item.dict())
-                    elif hasattr(item, '__dict__'): # 尝试序列化对象的__dict__
-                        try:
-                            # 注意：__dict__可能包含非JSON序列化对象，可能会再次引发TypeError
-                            # Pydantic模型通常不直接用__dict__，而是用.dict()
-                            serializable_list_items.append(item.__dict__)
-                        except Exception as e:
-                            logger.warning(f"jsonout: Could not convert item.__dict__ for JSON serialization: {e}. Using str(item).")
-                            serializable_list_items.append(str(item))
-                    else:
-                        # 假设 item 已经是字典或基本类型，或者我们接受它的 str 表示
-                        # 如果 Node 对象落到这里，会导致错误，所以需要确保 Node 被上面分支处理
-                        serializable_list_items.append(item)
-                processed_data = serializable_list_items
-            elif isinstance(data_to_serialize, BaseModel): # 如果是单个 Pydantic 模型
-                processed_data = data_to_serialize.dict()
-            elif hasattr(data_to_serialize, 'dict') and callable(data_to_serialize.dict):
-                processed_data = data_to_serialize.dict()
-            elif hasattr(data_to_serialize, '__dict__'):
-                try:
-                    processed_data = data_to_serialize.__dict__
-                except Exception as e:
-                    logger.warning(f"jsonout: Could not convert data_to_serialize.__dict__ for JSON serialization: {e}. Using str(data_to_serialize).")
-                    processed_data = str(data_to_serialize)
-            else:
-                # 假设 data_to_serialize 已经是字典或基本类型
-                processed_data = data_to_serialize
-            json_output = json.dumps(processed_data, indent=2, ensure_ascii=False)
-            logger.info(f"{log_prefix}: \n{json_output}")
-        except TypeError as e:
-            logger.error(f"{log_prefix}: Failed to serialize data to JSON due to TypeError: {e}")
-            logger.error(f"{log_prefix}: Original Data (repr): {repr(data_to_serialize)}")
-        except Exception as e:
-            logger.error(f"{log_prefix}: An unexpected error occurred during JSON serialization: {e}")
-            logger.error(f"{log_prefix}: Original Data (repr): {repr(data_to_serialize)}")
-        return
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
@@ -743,12 +690,34 @@ class SpamDetectorPlugin(Star):
                     )
                     nodes.append(timestamp_node)
                     
-                    comp_node = Comp.Node(
-                        uin=str(user_id),
-                        name=f"{user_name}",
-                        content=original_messages  # 每个组件作为单独的节点内容
-                    )
-                    nodes.append(comp_node)
+                    # 然后为每个原始组件创建单独的节点，保持原始组件不变
+                    for j, original_comp in enumerate(original_messages):
+                        # 如果原始组件是合并转发节点列表，直接添加已有节点
+                        if isinstance(original_comp, list):
+                            for nested_node in original_comp:
+                                nodes.append(nested_node)
+                            continue
+                        # 如果原始组件本身就是 Comp.Node，直接复用
+                        if isinstance(original_comp, Comp.Node):
+                            nodes.append(original_comp)
+                            continue
+                        # 其他组件转成一个节点，content 中仅一个片段
+                        if isinstance(original_comp, dict):
+                            seg = original_comp
+                        elif hasattr(original_comp, 'dict'):
+                            try:
+                                seg = original_comp.dict()
+                            except:
+                                seg = {'type': getattr(original_comp, 'type', ''), 'data': getattr(original_comp, 'data', {})}
+                        else:
+                            seg = {'type': getattr(original_comp, 'type', ''), 'data': getattr(original_comp, 'data', {})}
+
+                        comp_node = Comp.Node(
+                            uin=str(user_id),
+                            name=f"{user_name}",
+                            content=[seg]
+                        )
+                        nodes.append(comp_node)
                 else:
                     # 如果没有原始组件，不添加内容，并报错，说明有重复检测
                     logger.warning(f"用户 {user_id} 的消息记录中缺少原始组件，可能是重复检测")
@@ -765,45 +734,59 @@ class SpamDetectorPlugin(Star):
             if platform_name == "aiocqhttp":
                 client = event.bot
                 
-                # 构建原生转发消息，直接使用Node的content
+                # 将 Comp 组件序列化为 CQHTTP 片段
+                def _serialize_segment(seg: Any) -> Dict[str, Any]:
+                    try:
+                        # dict 片段统一规范为 {type, data}
+                        if isinstance(seg, dict):
+                            t = seg.get('type')
+                            d = seg.get('data')
+                            if not t:
+                                # 从常见键推断文本
+                                if 'text' in seg and isinstance(seg.get('text'), (str, int, float)):
+                                    return {'type': 'text', 'data': {'text': str(seg.get('text'))}}
+                                # 无可推断，序列化为文本
+                                return {'type': 'text', 'data': {'text': json.dumps(seg, ensure_ascii=False)}}
+                            if d is None:
+                                d = {}
+                            return {'type': t, 'data': d}
+                        # 文本
+                        if isinstance(seg, Comp.Plain):
+                            return {"type": "text", "data": {"text": getattr(seg, 'text', '')}}
+                        # 图片
+                        if isinstance(seg, Comp.Image):
+                            data = {}
+                            url = getattr(seg, 'url', None)
+                            file = getattr(seg, 'file', None)
+                            if url:
+                                data['url'] = url
+                            if file:
+                                data['file'] = file
+                            return {"type": "image", "data": data}
+                        # @ 提及
+                        if isinstance(seg, Comp.At):
+                            return {"type": "at", "data": {"qq": getattr(seg, 'qq', '')}}
+                        # 其他类型，尽量降级为文本
+                        return {"type": "text", "data": {"text": str(seg)}}
+                    except Exception as _:
+                        return {"type": "text", "data": {"text": str(seg)}}
+
                 forward_msg = []
                 for node in nodes:
+                    # content 统一转为列表
+                    content_list = node.content if isinstance(node.content, list) else [node.content]
+                    serialized_content = []
+                    for seg in content_list:
+                        serialized_content.append(_serialize_segment(seg))
                     forward_msg.append({
                         "type": "node",
                         "data": {
                             "uin": str(node.uin),
                             "name": node.name,
-                            "content": node.content  # 直接使用Node的content，让CQHTTP自动处理
+                            "content": serialized_content
                         }
                     })
-                # def build_forward_list(node_list):
-                #     if not isinstance(node_list, Comp.Node):
-                #         return node_list
-                #     result = []
-                #     for nd in node_list:
-                #         # for comp in nd.content:
-                #         result.append({
-                #             "type": "node",
-                #             "data": {
-                #                 "uin": str(nd.uin),
-                #                 "name": nd.name,
-                #                 "content": build_forward_list(nd.content)
-                #             }
-                #         })
-                #         # # 如果有嵌套节点，递归加入
-                #         # nested = [comp for comp in nd.content if isinstance(comp, Comp.Node)]
-                #         # if nested:
-                #         #     result.extend(build_forward_list(nested))
-                #     return result
-
-                # forward_msg = build_forward_list(nodes)
-                # original_comp_json = json.dumps(forward_msg, indent=2, ensure_ascii=False)
-                # logger.info(f"Original forward_msg (Dict JSON): \n{original_comp_json}")
-
-                # self.jsonout(forward_msg)
                 
-
-
                 ret = await client.api.call_action(
                     'send_group_forward_msg',
                     group_id=str(admin_chat_id),
@@ -1136,75 +1119,6 @@ class SpamDetectorPlugin(Star):
             logger.warning(f"构建简单文本时出错: {e}")
             return "[消息内容解析失败]"
     
-    async def _process_forward_message_recursive(self, nested_data: List[Dict], timestamp: int, depth: int = 0, max_depth: int = 3) -> List[Any]:
-        """
-        递归处理合并转发消息，支持多层嵌套
-        
-        Args:
-            nested_data: 预先获取的嵌套消息数据结构
-            timestamp: 时间戳
-            depth: 当前递归深度
-            max_depth: 最大递归深度
-            
-        Returns:
-            List[Any]: 处理后的消息组件列表
-        """
-        if depth >= max_depth:
-            logger.warning(f"达到最大递归深度 {max_depth}，停止处理")
-            return []
-        
-        if not nested_data:
-            logger.debug(f"第{depth}层嵌套数据为空，返回")
-            return []
-        
-        processed_nodes = []
-        
-        try:
-            logger.debug(f"处理第{depth}层嵌套数据，包含 {len(nested_data)} 个节点")
-            
-            for node in nested_data:
-                timesend = node.get('time', timestamp)
-                sender = node.get('sender', {})
-                uint = str(sender.get('user_id', ''))
-                namet = sender.get('nickname', '')
-                content_list = node.get('message', [])
-                
-                # 处理节点内的消息组件
-                comps = []
-                for seg in content_list:
-                    t = seg.get('type')
-                    d = seg.get('data', {})
-                    
-                    if t in ('text', 'plain'):
-                        comps.append(Comp.Plain(d.get('text', '')))
-                    elif t == 'image':
-                        comps.append(Comp.Image(url=d.get('url'), file=d.get('file')))
-                    elif t == 'at':
-                        comps.append(Comp.At(qq=d.get('qq')))
-                    elif t == 'forward':
-                        # 发现嵌套的转发消息，从content中获取嵌套结构递归处理
-                        nested_content = d.get('content', [])
-                        if nested_content:
-                            logger.info(f"发现嵌套转发消息，深度 {depth + 1}，包含 {len(nested_content)} 个子节点")
-                            nested_nodes = await self._process_forward_message_recursive(
-                                nested_content, timesend, depth + 1, max_depth
-                            )
-                            comps.extend(nested_nodes)
-                        else:
-                            logger.warning(f"转发消息缺少嵌套内容，跳过处理")
-                            comps.append(seg)
-                    else:
-                        # 其他类型的消息组件，直接保留
-                        comps.append(seg)
-                
-                # 创建节点组件
-                processed_nodes.append(Comp.Node(uin=uint, name=namet, content=comps, time=timesend))
-                
-        except Exception as e:
-            logger.warning(f"处理转发消息失败（深度 {depth}）: {e}")
-        
-        return processed_nodes
-    
     def _should_process_message_type(self, event: AstrMessageEvent) -> bool:
         """检查消息类型是否需要处理（只处理文本和图片，不处理合并转发）"""
         try:
@@ -1279,9 +1193,9 @@ class SpamDetectorPlugin(Star):
             user_name = event.get_sender_name()
             message_content = event.message_str
             timestamp = time.time()
-
+            
             logger.debug(f"收到群聊消息: 群聊 {group_id}, 用户 {user_id}, 内容: {message_content[:50]}...")
-
+            
             # 群聊白名单检查
             if not self._is_group_blacklisted(group_id):
                 logger.debug(f"群聊 {group_id} 不在白名单中，跳过检测")
@@ -1294,9 +1208,6 @@ class SpamDetectorPlugin(Star):
                 return
             logger.debug(f"用户 {user_id} 不在白名单中")
             
-            # 检查消息类型是否需要处理（只处理文本、图片和合并转发）
-            
-
             # 获取消息ID
             raw_msg = getattr(event.message_obj, 'raw_message', {})
             msg_id = None
@@ -1307,40 +1218,49 @@ class SpamDetectorPlugin(Star):
             
             # 使用异步锁保护消息池访问
             async with self.message_pool_lock:
-                # 遍历组件，遇到 Forward 组件时额外请求获取内部节点，并保留原始组件
+                # 遍历组件，遇到合并转发组件时，提取内部节点并直接加入消息池
                 original_messages: List[Any] = []
-                max_depth = int(self._get_config_value("FORWARD_MESSAGE_MAX_DEPTH", 3))
-                
                 for comp in event.get_messages():
                     if isinstance(comp, Comp.Forward):
-                        # 处理合并转发消息，支持多层嵌套
                         try:
-                            # 在此处进行一次API请求获取完整结构
                             resp = await event.bot.api.call_action('get_forward_msg', message_id=str(msg_id))
-                            nested_structure = resp.get('messages', [])
-                            self.jsonout(nested_structure, f"用户 {user_id} 的原始消息组件")
-                            
-                            # 将完整结构传递给递归函数进行处理
-                            nested_nodes = await self._process_forward_message_recursive(
-                                nested_structure, timestamp, depth=0, max_depth=max_depth
-                            )
-                            original_messages.extend(nested_nodes)
+                            nested = resp.get('messages', []) or resp.get('message', [])
+                            for node in nested:
+                                sender = node.get('sender', {})
+                                uin = str(sender.get('user_id', ''))
+                                name = sender.get('nickname', '')
+                                content_list = node.get('message', []) or node.get('content', [])
+                                comps: List[Comp.BaseMessageComponent] = []
+                                for seg in content_list:
+                                    t = seg.get('type')
+                                    d = seg.get('data', {})
+                                    if t in ('text', 'plain'):
+                                        comps.append(Comp.Plain(d.get('text', '')))
+                                    elif t == 'image':
+                                        comps.append(Comp.Image(url=d.get('url'), file=d.get('file')))
+                                    elif t == 'at':
+                                        comps.append(Comp.At(qq=d.get('qq')))
+                                    else:
+                                        # 兼容原始 struct dict
+                                        comps.append(seg)
+                                original_messages.extend([Comp.Node(uin=uin, name=name, content=comps)])
                         except Exception as e:
-                            logger.warning(f"处理合并转发消息失败: {e}")
+                            logger.warning(f"请求转发消息内部内容失败: {e}")
                     else:
                         original_messages.append(comp)
+                # 将组件及转发节点存入消息池
                 self._add_message_to_pool(
                     group_id, user_id, timestamp,
                     str(msg_id) if msg_id else "",
                     original_messages
                 )
-                self.jsonout(original_messages, f"用户 {user_id} 的消息组件")
                 logger.debug(f"已将消息组件及转发节点添加到群聊 {group_id} 用户 {user_id} 的消息池")
             
+            # 检查消息类型是否需要处理（只处理文本、图片和合并转发）
             if not self._should_process_message_type(event):
                 logger.debug(f"消息类型不需要处理，跳过检测: {message_content[:50]}...")
                 return
-            
+                
             # 检查队列大小，避免积压过多
             max_queue_size = int(self._get_config_value("MAX_DETECTION_QUEUE_SIZE", 60))
             if self.detection_queue.qsize() >= max_queue_size:

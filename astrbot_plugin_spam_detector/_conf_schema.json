@@ -161,5 +161,11 @@
     "type": "int",
     "default": 2,
     "hint": "同时进行的AI模型调用的最大数量，防止过多并发请求。建议设置为2-5"
+  },
+  "FORWARD_MESSAGE_MAX_DEPTH": {
+    "description": "合并转发消息最大搜索深度",
+    "type": "int",
+    "default": 3,
+    "hint": "处理合并转发消息时的最大嵌套深度，防止无限递归。建议设置为2-5层"
   }
 }
