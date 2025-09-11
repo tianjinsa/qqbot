@@ -167,5 +167,11 @@
     "type": "int",
     "default": 3,
     "hint": "处理合并转发消息时的最大嵌套深度，防止无限递归。建议设置为2-5层"
+  },
+  "FORWARD_MESSAGE_MAX_IMAGES": {
+    "description": "合并转发消息最大提取图片数量",
+    "type": "int",
+    "default": 10,
+    "hint": "从合并转发消息中提取的最大图片数量，避免处理过多图片。建议设置为5-20个"
   }
 }

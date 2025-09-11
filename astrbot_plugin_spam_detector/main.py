@@ -118,7 +118,7 @@ class SpamDetectorPlugin(Star):
                 
                 if not timeout_occurred:
                     # 正常获取到任务
-                    group_id, user_id, user_name, message_content, timestamp, event = detection_task
+                    group_id, user_id, user_name, message_content, timestamp, image_urls, event = detection_task
                     # 初始化群聊的批量缓冲区
                     if group_id not in self.batch_buffer:
                         self.batch_buffer[group_id] = []
@@ -173,46 +173,26 @@ class SpamDetectorPlugin(Star):
             logger.error(f"批量处理任务时出错: {e}", exc_info=True)
     
     async def _build_full_content(self, task: tuple) -> str:
-        """构建完整的消息内容（文本+图片），在检测时提取图片内容"""
-        _, user_id, user_name, message_content, timestamp, event = task
+        """构建完整的消息内容（文本+图片），使用预提取的图片URL列表"""
+        _, user_id, user_name, message_content, timestamp, image_urls, event = task
         full_content = message_content
         
-        # 在检测时提取图片内容，而不是在入队时
-        try:
-            image_content = await self._extract_image_content_from_event(event)
-            if image_content:
-                full_content += f"\n图片内容：{image_content}"
-                logger.debug(f"为用户 {user_id} 提取图片内容: {image_content[:100]}...")
-        except Exception as e:
-            logger.warning(f"提取用户 {user_id} 图片内容失败: {e}")
+        # 如果有图片URL列表，提取图片内容
+        if image_urls:
+            try:
+                logger.debug(f"提取 {len(image_urls)} 张图片的内容")
+                image_content = await self._extract_image_content(image_urls)
+                if image_content:
+                    full_content = f"{message_content}\n[图片内容]: {image_content}"
+            except Exception as e:
+                logger.warning(f"提取图片内容失败: {e}")
         
         return full_content
     
-    async def _extract_image_content_from_event(self, event: AstrMessageEvent) -> str:
-        """从事件中提取图片内容"""
-        try:
-            image_urls = []
-            for msg_comp in event.get_messages():
-                if isinstance(msg_comp, Comp.Image):
-                    if hasattr(msg_comp, 'url') and msg_comp.url:
-                        image_urls.append(msg_comp.url)
-                    elif hasattr(msg_comp, 'file') and msg_comp.file:
-                        image_urls.append(msg_comp.file)
-            
-            if image_urls:
-                logger.debug(f"检测到图片: {len(image_urls)} 张")
-                image_content = await self._extract_image_content(image_urls)
-                return image_content or ""
-            return ""
-            
-        except Exception as e:
-            logger.warning(f"从事件提取图片内容时出错: {e}")
-            return ""
-    
     def _extract_task_info(self, task: tuple) -> tuple:
         """提取任务信息"""
-        _, user_id, user_name, message_content, timestamp, event = task
-        return user_id, user_name, message_content, timestamp, event
+        _, user_id, user_name, message_content, timestamp, image_urls, event = task
+        return user_id, user_name, message_content, timestamp, image_urls, event
     
     async def _process_task_batch(self, tasks: List[tuple], group_id: str, batch_type: str):
         """处理一批任务"""
@@ -227,7 +207,7 @@ class SpamDetectorPlugin(Star):
         users_to_lock = set()  # 需要加锁的用户
         num=0
         for task in tasks:
-            user_id, user_name, message_content, timestamp, event = self._extract_task_info(task)
+            user_id, user_name, message_content, timestamp, image_urls, event = self._extract_task_info(task)
             user_lock = (group_id, user_id)
             # 跳过已在处理中的用户
             if user_lock in self.processing_users:
@@ -264,7 +244,7 @@ class SpamDetectorPlugin(Star):
             for user_id in spam_user_ids:
                 if user_id in task_map:
                     task = task_map[user_id]
-                    user_id, user_name, message_content, timestamp, event = self._extract_task_info(task)
+                    user_id, user_name, message_content, timestamp, image_urls, event = self._extract_task_info(task)
                     await self._handle_spam_detection_result(user_id, user_name, group_id, event, batch_type)
             
             logger.info(f"{batch_type}处理完成，发现 {len(spam_user_ids)} 个推销用户，分别是: {', '.join(spam_user_ids)}")
@@ -896,11 +876,11 @@ class SpamDetectorPlugin(Star):
             if not vision_api_key:
                 logger.warning("视觉模型API Key未配置，无法处理图片内容")
                 return ""
-            
+            # logger.info(f"开始处理 {len(image_urls)} 张图片以提取内容")
             # 处理图片URL，支持HTTP链接和本地文件路径转base64
             processed_images = []
-            for i, url in enumerate(image_urls[:4]):  # 最多处理4张图片
-                logger.debug(f"处理图片 {i+1}/{len(image_urls[:4])}: {url}")
+            for i, url in enumerate(image_urls):  # 最多处理4张图片
+                logger.debug(f"处理图片 {i+1}/{len(image_urls)}: {url}")
                 
                 if url.startswith(('http://', 'https://')):
                     # HTTP/HTTPS链接，直接使用URL
@@ -966,6 +946,7 @@ class SpamDetectorPlugin(Star):
             
             # 调用视觉模型
             result = await self._call_vision_model(messages)
+            logger.info(f"视觉模型返回结果: {result}..." if result else "视觉模型未返回结果")
             return result or ""
             
         except Exception as e:
@@ -1136,6 +1117,99 @@ class SpamDetectorPlugin(Star):
             logger.warning(f"构建简单文本时出错: {e}")
             return "[消息内容解析失败]"
     
+    def _extract_content_from_messages(self, original_messages: List[Any]) -> tuple[str, List[str]]:
+        """
+        从original_messages中按深度优先提取文本和图片URL，使用多次遍历减少内存占用
+        
+        Args:
+            original_messages: 处理后的消息组件列表
+            
+        Returns:
+            tuple[str, List[str]]: (合并的文本内容, 图片URL列表)
+        """
+        max_text_length = int(self._get_config_value("BATCH_MAX_TEXT_LENGTH", 5000))
+        max_images = int(self._get_config_value("FORWARD_MESSAGE_MAX_IMAGES", 10))
+        max_depth = int(self._get_config_value("FORWARD_MESSAGE_MAX_DEPTH", 3))
+        max_depth+=1
+        text_parts = []
+        image_urls = []
+        current_text_length = 0
+        
+        def extract_content_at_depth(components: List[Any], target_depth: int, current_depth: int = 0) -> tuple[List[str], List[str]]:
+            """在指定深度提取内容"""
+            texts = []
+            images = []
+            
+            for comp in components:
+                if current_depth == target_depth:
+                    # 当前深度匹配，提取内容
+                    if isinstance(comp, Comp.Plain):
+                        text = comp.text.strip()
+                        if text:
+                            texts.append(text)
+                    elif isinstance(comp, Comp.Image):
+                        url = getattr(comp, 'url', None) or getattr(comp, 'file', None)
+                        if url:
+                            images.append(url)
+                else:
+                    # 需要继续深入
+                    if isinstance(comp, Comp.Node):
+                        node_content = getattr(comp, 'content', [])
+                        if node_content:
+                            sub_texts, sub_images = extract_content_at_depth(
+                                node_content, target_depth, current_depth + 1
+                            )
+                            texts.extend(sub_texts)
+                            images.extend(sub_images)
+                    elif hasattr(comp, 'content') and isinstance(comp.content, list):
+                        sub_texts, sub_images = extract_content_at_depth(
+                            comp.content, target_depth, current_depth + 1
+                        )
+                        texts.extend(sub_texts)
+                        images.extend(sub_images)
+            
+            return texts, images
+        
+        # 按深度逐层提取内容，深度越小优先级越高
+        for depth in range(max_depth):
+            # logger.info(f"正在提取第{depth}层内容")
+            
+            # 提取当前深度的所有文本和图片
+            depth_texts, depth_images = extract_content_at_depth(original_messages, depth)
+            
+            # 添加文本内容（检查长度限制）
+            for text in depth_texts:
+                if current_text_length + len(text) <= max_text_length:
+                    text_parts.append(text)
+                    current_text_length += len(text)
+                else:
+                    # 即使超出限制，也添加当前文本，然后停止
+                    text_parts.append(text)
+                    logger.info(f"在第{depth}层达到文本长度限制，停止提取")
+                    break
+            
+            # 添加图片URL（检查数量限制）
+            for img_url in depth_images:
+                if len(image_urls) < max_images:
+                    image_urls.append(img_url)
+                else:
+                    break
+            
+            # 检查是否已达到所有限制
+            if current_text_length >= max_text_length and len(image_urls) >= max_images:
+                logger.debug(f"在第{depth}层达到所有限制，停止提取")
+                break
+            
+            # 如果当前深度没有内容，也可以继续下一深度
+            if not depth_texts and not depth_images:
+                logger.debug(f"第{depth}层无内容，继续下一层")
+                continue
+        
+        combined_text = '\n'.join(text_parts)
+        logger.info(f"从消息中提取文本长度: {len(combined_text)}, 图片数量: {len(image_urls)}")
+        
+        return combined_text, image_urls
+    
     async def _process_forward_message_recursive(self, nested_data: List[Dict], timestamp: int, depth: int = 0, max_depth: int = 3) -> List[Any]:
         """
         递归处理合并转发消息，支持多层嵌套
@@ -1151,11 +1225,11 @@ class SpamDetectorPlugin(Star):
         """
         if depth >= max_depth:
             logger.warning(f"达到最大递归深度 {max_depth}，停止处理")
-            return []
+            return [Comp.Plain("[嵌套消息过深，无法显示]")]
         
         if not nested_data:
             logger.debug(f"第{depth}层嵌套数据为空，返回")
-            return []
+            return [Comp.Plain("[嵌套消息为空，无法显示]")]
         
         processed_nodes = []
         
@@ -1182,16 +1256,15 @@ class SpamDetectorPlugin(Star):
                     elif t == 'at':
                         comps.append(Comp.At(qq=d.get('qq')))
                     elif t == 'forward':
-                        # 发现嵌套的转发消息，从content中获取嵌套结构递归处理
+                        # 发现嵌套的合并消息，从content中获取嵌套结构递归处理
                         nested_content = d.get('content', [])
                         if nested_content:
-                            logger.info(f"发现嵌套转发消息，深度 {depth + 1}，包含 {len(nested_content)} 个子节点")
                             nested_nodes = await self._process_forward_message_recursive(
                                 nested_content, timesend, depth + 1, max_depth
                             )
                             comps.extend(nested_nodes)
                         else:
-                            logger.warning(f"转发消息缺少嵌套内容，跳过处理")
+                            logger.warning(f"合并消息缺少嵌套内容，跳过处理")
                             comps.append(seg)
                     else:
                         # 其他类型的消息组件，直接保留
@@ -1206,31 +1279,11 @@ class SpamDetectorPlugin(Star):
         return processed_nodes
     
     def _should_process_message_type(self, event: AstrMessageEvent) -> bool:
-        """检查消息类型是否需要处理（只处理文本和图片，不处理合并转发）"""
+        """检查消息类型是否需要处理（处理文本、图片和合并转发）"""
         try:
             message_components = event.get_messages()
             
-            # 先检查是否包含合并转发消息，如果是则不进入处理队列
-            for msg_comp in message_components:
-                # 检查是否为合并转发消息
-                if hasattr(msg_comp, 'type') and getattr(msg_comp, 'type', '') == 'forward':
-                    logger.debug("检测到合并转发消息，不进入处理队列")
-                    return False
-                
-                # 检查其他可能的合并转发标识
-                elif type(msg_comp).__name__.lower() in ['forward', 'forwardmessage', 'merge', 'mergeforward']:
-                    logger.debug("检测到合并转发消息，不进入处理队列")
-                    return False
-                
-                # 检查是否有forward相关属性
-                elif hasattr(msg_comp, 'messages') or (hasattr(msg_comp, 'content') and 
-                    isinstance(getattr(msg_comp, 'content'), list) and 
-                    len(getattr(msg_comp, 'content')) > 0):
-                    # 可能是合并转发消息
-                    logger.debug("检测到疑似合并转发消息，不进入处理队列")
-                    return False
-            
-            # 检查是否包含可处理的消息类型（文本或图片）
+            # 检查是否包含可处理的消息类型（文本、图片或合并转发）
             for msg_comp in message_components:
                 # 检查是否为文本消息
                 if isinstance(msg_comp, Comp.Plain):
@@ -1239,8 +1292,19 @@ class SpamDetectorPlugin(Star):
                 # 检查是否为图片消息
                 elif isinstance(msg_comp, Comp.Image):
                     return True
+                
+                # 检查是否为合并转发消息
+                elif isinstance(msg_comp, Comp.Forward):
+                    logger.debug("检测到合并转发消息，将进入处理队列")
+                    return True
+                elif hasattr(msg_comp, 'type') and getattr(msg_comp, 'type', '') == 'forward':
+                    logger.debug("检测到合并转发消息，将进入处理队列")
+                    return True
+                elif type(msg_comp).__name__.lower() in ['forward', 'forwardmessage', 'merge', 'mergeforward']:
+                    logger.debug("检测到合并转发消息，将进入处理队列")
+                    return True
             
-            # 如果没有找到文本或图片组件，检查是否有消息文本
+            # 如果没有找到可识别的组件，检查是否有消息文本
             if event.message_str and event.message_str.strip():
                 return True
             
@@ -1318,7 +1382,7 @@ class SpamDetectorPlugin(Star):
                             # 在此处进行一次API请求获取完整结构
                             resp = await event.bot.api.call_action('get_forward_msg', message_id=str(msg_id))
                             nested_structure = resp.get('messages', [])
-                            self.jsonout(nested_structure, f"用户 {user_id} 的原始消息组件")
+                            # self.jsonout(nested_structure, f"用户 {user_id} 的原始消息组件")
                             
                             # 将完整结构传递给递归函数进行处理
                             nested_nodes = await self._process_forward_message_recursive(
@@ -1334,12 +1398,34 @@ class SpamDetectorPlugin(Star):
                     str(msg_id) if msg_id else "",
                     original_messages
                 )
-                self.jsonout(original_messages, f"用户 {user_id} 的消息组件")
+                # self.jsonout(original_messages, f"用户 {user_id} 的消息组件")
                 logger.debug(f"已将消息组件及转发节点添加到群聊 {group_id} 用户 {user_id} 的消息池")
             
+            # 检查消息类型是否需要处理
             if not self._should_process_message_type(event):
                 logger.debug(f"消息类型不需要处理，跳过检测: {message_content[:50]}...")
                 return
+            
+            # 处理合并转发消息的内容提取
+            extracted_text = message_content
+            extracted_images = []
+            
+            # 如果包含合并转发消息，提取其中的文本和图片
+            has_forward_message = any(isinstance(comp, Comp.Forward) for comp in event.get_messages())
+            if has_forward_message and original_messages:
+                logger.info(f"检测到合并转发消息，提取内容进行检测")
+                extracted_text, extracted_images = self._extract_content_from_messages(original_messages)
+                if extracted_text:
+                    logger.debug(f"从合并转发消息中提取文本长度: {len(extracted_text)}")
+                if extracted_images:
+                    logger.debug(f"从合并转发消息中提取图片数量: {len(extracted_images)}")
+            else:
+                # 普通消息，提取图片URL
+                for comp in event.get_messages():
+                    if isinstance(comp, Comp.Image):
+                        url = getattr(comp, 'url', None) or getattr(comp, 'file', None)
+                        if url:
+                            extracted_images.append(url)
             
             # 检查队列大小，避免积压过多
             max_queue_size = int(self._get_config_value("MAX_DETECTION_QUEUE_SIZE", 60))
@@ -1347,10 +1433,10 @@ class SpamDetectorPlugin(Star):
                 logger.warning(f"检测队列已满 ({self.detection_queue.qsize()})，跳过当前消息")
                 return
             
-            # 将检测任务加入队列：(群聊ID, 用户ID, 用户名, 消息内容, 发送时间, 事件对象)
-            # 注意：图片内容将在检测时提取，而不是在入队时提取，以提高入队速度
-            logger.debug(f"将消息加入检测队列: {message_content[:50]}...")
-            detection_task = (group_id, user_id, user_name, message_content, timestamp, event)
+            # 将检测任务加入队列：(群聊ID, 用户ID, 用户名, 消息内容, 发送时间, 图片URL列表, 事件对象)
+            # 修改：预先提取图片URL列表，减少检测时的处理开销
+            logger.debug(f"将消息加入检测队列: {extracted_text[:50]}...")
+            detection_task = (group_id, user_id, user_name, extracted_text, timestamp, extracted_images, event)
             await self.detection_queue.put(detection_task)
             logger.debug(f"消息已加入队列，当前队列大小: {self.detection_queue.qsize()}")
                 
