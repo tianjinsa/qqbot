@@ -16,7 +16,7 @@ from astrbot.api import logger, AstrBotConfig
 import astrbot.api.message_components as Comp
 
 
-@register("astrbot_plugin_spam_detector", "AstrBot Dev Team", "智能防推销插件，使用AI检测并处理推销信息", "1.2.2", "https://github.com/tianjinsa/qqbot/tree/main/astrbot_plugin_spam_detector")
+@register("astrbot_plugin_spam_detector", "AstrBot Dev Team", "智能防推销插件，使用AI检测并处理推销信息", "1.2.3", "https://github.com/tianjinsa/qqbot/tree/main/astrbot_plugin_spam_detector")
 class SpamDetectorPlugin(Star):
     def jsonout(self, data_to_serialize, log_prefix="JSON Output"): # 增加log_prefix参数，方便区分日志来源
         """
@@ -783,33 +783,6 @@ class SpamDetectorPlugin(Star):
                             "content": node.content  # 直接使用Node的content，让CQHTTP自动处理
                         }
                     })
-                # def build_forward_list(node_list):
-                #     if not isinstance(node_list, Comp.Node):
-                #         return node_list
-                #     result = []
-                #     for nd in node_list:
-                #         # for comp in nd.content:
-                #         result.append({
-                #             "type": "node",
-                #             "data": {
-                #                 "uin": str(nd.uin),
-                #                 "name": nd.name,
-                #                 "content": build_forward_list(nd.content)
-                #             }
-                #         })
-                #         # # 如果有嵌套节点，递归加入
-                #         # nested = [comp for comp in nd.content if isinstance(comp, Comp.Node)]
-                #         # if nested:
-                #         #     result.extend(build_forward_list(nested))
-                #     return result
-
-                # forward_msg = build_forward_list(nodes)
-                # original_comp_json = json.dumps(forward_msg, indent=2, ensure_ascii=False)
-                # logger.info(f"Original forward_msg (Dict JSON): \n{original_comp_json}")
-
-                # self.jsonout(forward_msg)
-                
-
 
                 ret = await client.api.call_action(
                     'send_group_forward_msg',
@@ -906,7 +879,7 @@ class SpamDetectorPlugin(Star):
             # logger.info(f"开始处理 {len(image_urls)} 张图片以提取内容")
             # 处理图片URL，支持HTTP链接和本地文件路径转base64
             processed_images = []
-            for i, url in enumerate(image_urls):  # 最多处理4张图片
+            for i, url in enumerate(image_urls):
                 logger.debug(f"处理图片 {i+1}/{len(image_urls)}: {url}")
                 
                 if url.startswith(('http://', 'https://')):
@@ -1371,6 +1344,8 @@ class SpamDetectorPlugin(Star):
             message_content = event.message_str
             timestamp = time.time()
 
+            # self.jsonout(event.message_obj.message, f"收到的原始消息对象 - 群聊 {group_id} 用户 {user_id}")
+
             logger.debug(f"收到群聊消息: 群聊 {group_id}, 用户 {user_id}, 内容: {message_content[:50]}...")
 
             # 群聊白名单检查
@@ -1385,9 +1360,6 @@ class SpamDetectorPlugin(Star):
                 return
             logger.debug(f"用户 {user_id} 不在白名单中")
             
-            # 检查消息类型是否需要处理（只处理文本、图片和合并转发）
-            
-
             # 获取消息ID
             raw_msg = getattr(event.message_obj, 'raw_message', {})
             msg_id = None
@@ -1419,6 +1391,7 @@ class SpamDetectorPlugin(Star):
                         except Exception as e:
                             logger.warning(f"处理合并转发消息失败: {e}")
                     else:
+                        # self.jsonout(comp, f"用户 {user_id} 的comp")
                         original_messages.append(comp)
                 self._add_message_to_pool(
                     group_id, user_id, timestamp,
@@ -1455,7 +1428,7 @@ class SpamDetectorPlugin(Star):
                             extracted_images.append(url)
             
             # 检查队列大小，避免积压过多
-            max_queue_size = int(self._get_config_value("MAX_DETECTION_QUEUE_SIZE", 60))
+            max_queue_size = int(self._get_config_value("MAX_DETECTION_QUEUE_SIZE", 180))
             if self.detection_queue.qsize() >= max_queue_size:
                 logger.warning(f"检测队列已满 ({self.detection_queue.qsize()})，跳过当前消息")
                 return
